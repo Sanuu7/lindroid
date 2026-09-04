@@ -6,7 +6,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.hardware.display.DisplayManager
 import android.os.IBinder
+import android.view.Display
 import androidx.core.app.NotificationCompat
 import dev.lindroid.app.R
 import dev.lindroid.app.desktop.DesktopActivity
@@ -23,6 +25,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.SecureRandom
+import kotlin.math.roundToInt
 
 enum class DesktopSessionStatus {
     STOPPED,
@@ -77,9 +80,14 @@ class DesktopSessionService : Service() {
 
         scope.launch {
             try {
+                val (geometry, dpi) = displayProfile()
                 val command = ProotRuntime.cleanEnvironment(
                     command = listOf("/bin/bash", "-lc", DESKTOP_SCRIPT),
-                    extra = mapOf("LINDROID_VNC_PASSWORD" to password),
+                    extra = mapOf(
+                        "LINDROID_VNC_PASSWORD" to password,
+                        "LINDROID_VNC_GEOMETRY" to geometry,
+                        "LINDROID_VNC_DPI" to dpi.toString(),
+                    ),
                 )
                 val running = ProotRuntime.processBuilder(this@DesktopSessionService, command).start()
                 process = running
@@ -135,8 +143,21 @@ class DesktopSessionService : Service() {
         }
     }
 
-    private suspend fun waitForVnc(process: Process): Boolean {
-        repeat(90) {
+    /**
+     * Sizes the desktop to the phone's own panel so it fills the screen at a
+     * one-to-one scale instead of letterboxing inside a fixed 1280x720 box.
+     */
+    private fun displayProfile(): Pair<String, Int> {
+        val display = (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
+            .getDisplay(Display.DEFAULT_DISPLAY)
+        val mode = display?.mode
+        val width = ((mode?.physicalWidth ?: 1280).coerceIn(640, 2560) / 2) * 2
+        val height = ((mode?.physicalHeight ?: 720).coerceIn(640, 2560) / 2) * 2
+        val dpi = ((resources.configuration.densityDpi * 0.65f).roundToInt()).coerceIn(96, 240)
+        return "${width}x${height}" to dpi
+    }
+
+    private suspend fun waitForVnc(process: Process): Boolean {        repeat(90) {
             if (!process.isAlive) return false
             val connected = runCatching {
                 Socket().use { socket ->
@@ -224,7 +245,7 @@ class DesktopSessionService : Service() {
             printf '%s\n' "${'$'}LINDROID_VNC_PASSWORD" | "${'$'}PASSWD_BIN" -f > /root/.vnc/passwd
             chmod 600 /root/.vnc/passwd
             test -s /etc/machine-id || dbus-uuidgen --ensure=/etc/machine-id
-            "${'$'}XVNC_BIN" :1 -geometry 1280x720 -depth 24 -dpi 120 -localhost -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -AlwaysShared -ac > /root/.vnc/Xtigervnc.log 2>&1 &
+            "${'$'}XVNC_BIN" :1 -geometry "${'$'}LINDROID_VNC_GEOMETRY" -depth 24 -dpi "${'$'}LINDROID_VNC_DPI" -localhost -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -AlwaysShared -ac > /root/.vnc/Xtigervnc.log 2>&1 &
             VNC_PID=${'$'}!
             export DISPLAY=:1
             export XDG_RUNTIME_DIR=/tmp/lindroid-runtime
