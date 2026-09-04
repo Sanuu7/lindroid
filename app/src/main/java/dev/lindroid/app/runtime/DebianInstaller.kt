@@ -1,6 +1,7 @@
 package dev.lindroid.app.runtime
 
 import android.content.Context
+import android.os.StatFs
 import android.system.Os
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -8,6 +9,7 @@ import okhttp3.Request
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.File
@@ -18,6 +20,7 @@ import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 class DebianInstaller(context: Context) {
+    private val appContext = context.applicationContext
     private val paths = RuntimePaths(context)
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -35,23 +38,23 @@ class DebianInstaller(context: Context) {
             val token = registryToken()
             val manifest = resolveArm64Manifest(token)
             val layers = manifest.getJSONArray("layers")
+            ensureFreeSpace(layers)
 
             for (index in 0 until layers.length()) {
                 val layer = layers.getJSONObject(index)
                 val digest = layer.getString("digest")
                 val expectedSize = layer.optLong("size", -1L)
                 val layerNumber = index + 1
-                report(index.toFloat() / layers.length(), "Downloading Debian layer $layerNumber of ${layers.length()}")
+                report(index.toFloat() / layers.length(), "Fetching Debian layer $layerNumber of ${layers.length()}")
                 val archive = downloadLayer(token, digest, expectedSize) { bytes, total ->
                     val withinLayer = if (total > 0) bytes.toFloat() / total else 0f
                     report(
                         (index + withinLayer) / layers.length(),
-                        "Downloading Debian • ${formatBytes(bytes)}",
+                        "Fetching Debian • ${formatBytes(bytes)}",
                     )
                 }
                 report((index + 0.92f) / layers.length(), "Unpacking Debian layer $layerNumber")
                 extractLayer(archive, paths.installStage)
-                archive.delete()
             }
 
             configureRootfs(paths.installStage)
@@ -101,6 +104,11 @@ class DebianInstaller(context: Context) {
         progress: (Long, Long) -> Unit,
     ): File {
         val output = File(paths.downloads, digest.substringAfter(':') + ".tar.gz")
+        if (expectedSize > 0 && output.isFile && output.length() == expectedSize && digestMatches(output, digest)) {
+            progress(expectedSize, expectedSize)
+            return output
+        }
+        val partial = File(paths.downloads, output.name + ".part")
         val request = registryRequest("blobs/$digest", token, "application/octet-stream")
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw IOException("Registry returned HTTP ${response.code}")
@@ -108,7 +116,7 @@ class DebianInstaller(context: Context) {
             val total = body.contentLength().takeIf { it > 0 } ?: expectedSize
             val hash = MessageDigest.getInstance("SHA-256")
             body.byteStream().use { input ->
-                FileOutputStream(output).use { file ->
+                FileOutputStream(partial).use { file ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 4)
                     var copied = 0L
                     while (true) {
@@ -124,7 +132,36 @@ class DebianInstaller(context: Context) {
             val actual = hash.digest().joinToString("") { "%02x".format(it) }
             check(digest == "sha256:$actual") { "Debian layer checksum verification failed" }
         }
+        output.delete()
+        check(partial.renameTo(output)) { "Could not store the Debian layer" }
         return output
+    }
+
+    private fun digestMatches(file: File, digest: String): Boolean = runCatching {
+        val hash = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 16)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                hash.update(buffer, 0, count)
+            }
+        }
+        digest == "sha256:" + hash.digest().joinToString("") { "%02x".format(it) }
+    }.getOrDefault(false)
+
+    /**
+     * Layers stay in the cache after a successful install so removing and
+     * reinstalling Debian does not have to redownload the image.
+     */
+    private fun ensureFreeSpace(layers: JSONArray) {
+        val layerBytes = (0 until layers.length()).sumOf { layers.getJSONObject(it).optLong("size", 0L) }
+        val available = StatFs(appContext.filesDir.path).availableBytes
+        // Downloaded archive plus the unpacked filesystem, with headroom.
+        val required = layerBytes * 4 + 256L * 1024L * 1024L
+        check(available >= required) {
+            "Not enough free space: Debian needs about ${formatBytes(required)} and only ${formatBytes(available)} is free"
+        }
     }
 
     private fun extractLayer(archive: File, destination: File) {

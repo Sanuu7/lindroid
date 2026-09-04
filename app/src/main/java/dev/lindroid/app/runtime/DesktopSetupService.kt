@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.os.StatFs
 import androidx.core.app.NotificationCompat
 import dev.lindroid.app.MainActivity
 import dev.lindroid.app.R
@@ -78,6 +79,7 @@ class DesktopSetupService : Service() {
 
         scope.launch {
             try {
+                ensureFreeSpace()
                 val command = ProotRuntime.cleanEnvironment(
                     listOf("/bin/bash", "-lc", SETUP_SCRIPT),
                 )
@@ -102,6 +104,18 @@ class DesktopSetupService : Service() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
+        }
+    }
+
+    /**
+     * The XFCE download needs roughly 1.2 GB free: APT archives plus the
+     * unpacked packages inside the rootfs.
+     */
+    private fun ensureFreeSpace() {
+        val available = StatFs(RuntimePaths(this).rootfs.path).availableBytes
+        check(available >= 1_200_000_000L) {
+            val gigabytes = available / (1024f * 1024f * 1024f)
+            "Not enough free space: the desktop needs about 1.2 GB and only %.1f GB is free".format(gigabytes)
         }
     }
 
