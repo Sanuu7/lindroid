@@ -721,8 +721,8 @@ private fun statusLabel(status: SessionStatus) = when (status) {
 }
 
 private fun shizukuLabel(mode: ShizukuMode) = when (mode) {
-    ShizukuMode.UNAVAILABLE -> "Not running — Lindroid works without it"
-    ShizukuMode.WAITING_FOR_PERMISSION -> "Running — permission needed"
+    ShizukuMode.UNAVAILABLE -> "Not running. Lindroid works without it"
+    ShizukuMode.WAITING_FOR_PERMISSION -> "Running. Permission needed"
     ShizukuMode.ADB -> "Connected with ADB shell privileges"
     ShizukuMode.ROOT -> "Connected with root privileges"
 }
