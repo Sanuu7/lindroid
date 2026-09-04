@@ -4,6 +4,10 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.lindroid.app.runtime.DebianInstaller
+import dev.lindroid.app.runtime.DesktopSessionBus
+import dev.lindroid.app.runtime.DesktopSessionService
+import dev.lindroid.app.runtime.DesktopSetupBus
+import dev.lindroid.app.runtime.DesktopSetupService
 import dev.lindroid.app.runtime.InstallState
 import dev.lindroid.app.runtime.LinuxSessionService
 import dev.lindroid.app.runtime.RuntimePaths
@@ -26,6 +30,14 @@ class LindroidViewModel(application: Application) : AndroidViewModel(application
     val sessionStatus = SessionBus.status
     val sessionError = SessionBus.error
     val shizukuMode = ShizukuState.mode
+    val desktopSetupStatus = DesktopSetupBus.status
+    val desktopSetupLog = DesktopSetupBus.log
+    val desktopSetupError = DesktopSetupBus.error
+    val desktopSessionStatus = DesktopSessionBus.status
+
+    init {
+        DesktopSetupBus.refresh(application)
+    }
 
     fun installDebian() {
         if (mutableInstallState.value is InstallState.Installing) return
@@ -58,4 +70,10 @@ class LindroidViewModel(application: Application) : AndroidViewModel(application
     fun clearTerminal() = SessionBus.clear()
 
     fun requestShizuku() = ShizukuState.requestPermission()
+
+    fun installDesktop() = DesktopSetupService.start(getApplication())
+
+    fun startDesktop() = DesktopSessionService.start(getApplication())
+
+    fun stopDesktop() = DesktopSessionService.stop(getApplication())
 }

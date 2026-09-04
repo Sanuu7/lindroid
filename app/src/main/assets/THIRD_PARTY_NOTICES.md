@@ -17,3 +17,9 @@ Termux package repository. Their licenses and source links are available at:
 
 The Debian filesystem is not bundled in the APK. At the user's request,
 Lindroid downloads the official `library/debian:12-slim` image from Docker Hub.
+
+Lindroid embeds noVNC 1.7.0 as its local graphical desktop client. noVNC is
+licensed under MPL-2.0, with some components under compatible licenses. Its full
+license file is included at `assets/novnc/LICENSE.txt`.
+Source: https://github.com/novnc/noVNC/tree/v1.7.0
+Source archive SHA-256: `b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6`

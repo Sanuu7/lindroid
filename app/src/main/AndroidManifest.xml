@@ -17,6 +17,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.Lindroid">
 
         <activity
@@ -28,6 +29,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".desktop.DesktopActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize"
+            android:exported="false"
+            android:theme="@style/Theme.Lindroid" />
+
         <service
             android:name=".runtime.LinuxSessionService"
             android:exported="false"
@@ -35,6 +42,24 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Runs the user-requested local Linux terminal session" />
+        </service>
+
+        <service
+            android:name=".runtime.DesktopSetupService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Installs the user-requested Debian graphical desktop packages" />
+        </service>
+
+        <service
+            android:name=".runtime.DesktopSessionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs the user-requested local Debian graphical desktop" />
         </service>
     </application>
 </manifest>
