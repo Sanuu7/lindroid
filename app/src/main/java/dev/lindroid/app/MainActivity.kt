@@ -1,6 +1,8 @@
 package dev.lindroid.app
 
 import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -39,12 +41,14 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material.icons.outlined.Android
 import androidx.compose.material.icons.outlined.Architecture
 import androidx.compose.material.icons.outlined.CloudDownload
@@ -95,7 +99,11 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.lindroid.app.desktop.DesktopActivity
+import dev.lindroid.app.runtime.DesktopSessionStatus
+import dev.lindroid.app.runtime.DesktopSetupStatus
 import dev.lindroid.app.runtime.InstallState
 import dev.lindroid.app.runtime.SessionStatus
 import dev.lindroid.app.shizuku.ShizukuMode
@@ -119,6 +127,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppPage(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Default.Home),
+    DESKTOP("Desktop", Icons.Default.Computer),
     TERMINAL("Terminal", Icons.Outlined.Terminal),
     SETTINGS("Settings", Icons.Default.Settings),
 }
@@ -131,19 +140,37 @@ private fun LindroidApp(viewModel: LindroidViewModel) {
     val sessionStatus by viewModel.sessionStatus.collectAsStateWithLifecycle()
     val sessionError by viewModel.sessionError.collectAsStateWithLifecycle()
     val shizukuMode by viewModel.shizukuMode.collectAsStateWithLifecycle()
+    val desktopSetupStatus by viewModel.desktopSetupStatus.collectAsStateWithLifecycle()
+    val desktopSetupLog by viewModel.desktopSetupLog.collectAsStateWithLifecycle()
+    val desktopSetupError by viewModel.desktopSetupError.collectAsStateWithLifecycle()
+    val desktopSessionStatus by viewModel.desktopSessionStatus.collectAsStateWithLifecycle()
     var selectedPage by rememberSaveable { mutableIntStateOf(0) }
+    var pendingForegroundAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val context = LocalContext.current
 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { viewModel.startSession() }
-    val startSession = {
-        if (Build.VERSION.SDK_INT >= 33) {
+    ) {
+        pendingForegroundAction?.invoke()
+        pendingForegroundAction = null
+    }
+    val runForegroundAction: (() -> Unit) -> Unit = { action ->
+        if (
+            Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingForegroundAction = action
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
-            viewModel.startSession()
+            action()
         }
+    }
+    val startSession = {
+        runForegroundAction { viewModel.startSession() }
         selectedPage = AppPage.TERMINAL.ordinal
     }
+    val installDesktop = { runForegroundAction { viewModel.installDesktop() } }
+    val openDesktop = { context.startActivity(Intent(context, DesktopActivity::class.java)) }
 
     Scaffold(
         contentWindowInsets = WindowInsets(0),
@@ -180,7 +207,26 @@ private fun LindroidApp(viewModel: LindroidViewModel) {
             modifier = Modifier.padding(padding),
         ) { page ->
             when (page) {
-                AppPage.HOME -> HomePage(installState, sessionStatus, viewModel::installDebian, startSession)
+                AppPage.HOME -> HomePage(
+                    installState = installState,
+                    sessionStatus = sessionStatus,
+                    desktopSetupStatus = desktopSetupStatus,
+                    desktopSessionStatus = desktopSessionStatus,
+                    onInstall = viewModel::installDebian,
+                    onInstallDesktop = installDesktop,
+                    onOpenDesktop = openDesktop,
+                    onStartTerminal = startSession,
+                )
+                AppPage.DESKTOP -> DesktopPage(
+                    linuxInstalled = installState is InstallState.Installed,
+                    setupStatus = desktopSetupStatus,
+                    sessionStatus = desktopSessionStatus,
+                    setupLog = desktopSetupLog,
+                    setupError = desktopSetupError,
+                    onInstallLinux = { selectedPage = AppPage.HOME.ordinal },
+                    onInstallDesktop = installDesktop,
+                    onOpenDesktop = openDesktop,
+                )
                 AppPage.TERMINAL -> TerminalPage(
                     installed = installState is InstallState.Installed,
                     output = output,
@@ -192,7 +238,7 @@ private fun LindroidApp(viewModel: LindroidViewModel) {
                     onClear = viewModel::clearTerminal,
                     onInstall = { selectedPage = AppPage.HOME.ordinal },
                 )
-                AppPage.SETTINGS -> SettingsPage(installState, shizukuMode, viewModel::requestShizuku)
+                AppPage.SETTINGS -> SettingsPage(installState, desktopSetupStatus, shizukuMode, viewModel::requestShizuku)
             }
         }
     }
@@ -215,8 +261,12 @@ private fun BrandMark() {
 private fun HomePage(
     installState: InstallState,
     sessionStatus: SessionStatus,
+    desktopSetupStatus: DesktopSetupStatus,
+    desktopSessionStatus: DesktopSessionStatus,
     onInstall: () -> Unit,
-    onStart: () -> Unit,
+    onInstallDesktop: () -> Unit,
+    onOpenDesktop: () -> Unit,
+    onStartTerminal: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -238,7 +288,14 @@ private fun HomePage(
         when (installState) {
             InstallState.NotInstalled -> InstallCard(onInstall)
             is InstallState.Installing -> InstallingCard(installState)
-            InstallState.Installed -> ReadyCard(sessionStatus, onStart)
+            InstallState.Installed -> ReadyCard(
+                sessionStatus,
+                desktopSetupStatus,
+                desktopSessionStatus,
+                onInstallDesktop,
+                onOpenDesktop,
+                onStartTerminal,
+            )
             is InstallState.Failed -> ErrorCard(installState.message, onInstall)
         }
 
@@ -248,10 +305,10 @@ private fun HomePage(
             FeatureChip(Icons.Outlined.Android, "Android kernel")
         }
 
-        Text("What works", style = MaterialTheme.typography.titleLarge)
+        Text("Your Linux machine", style = MaterialTheme.typography.titleLarge)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FeatureCard(Icons.Default.Code, "APT & CLI", "Install packages and run development tools.", Modifier.weight(1f))
-            FeatureCard(Icons.Outlined.Folder, "Persistent", "Keep Debian and your files between sessions.", Modifier.weight(1f))
+            FeatureCard(Icons.Default.ViewInAr, "XFCE desktop", "A real graphical Linux workspace inside the container.", Modifier.weight(1f))
+            FeatureCard(Icons.Outlined.Folder, "Persistent", "Keep apps, settings and files between sessions.", Modifier.weight(1f))
         }
         Spacer(Modifier.height(8.dp))
     }
@@ -298,7 +355,14 @@ private fun InstallingCard(state: InstallState.Installing) {
 }
 
 @Composable
-private fun ReadyCard(status: SessionStatus, onStart: () -> Unit) {
+private fun ReadyCard(
+    terminalStatus: SessionStatus,
+    desktopSetupStatus: DesktopSetupStatus,
+    desktopSessionStatus: DesktopSessionStatus,
+    onInstallDesktop: () -> Unit,
+    onOpenDesktop: () -> Unit,
+    onStartTerminal: () -> Unit,
+) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
         shape = RoundedCornerShape(topStart = 18.dp, topEnd = 44.dp, bottomEnd = 18.dp, bottomStart = 44.dp),
@@ -308,16 +372,123 @@ private fun ReadyCard(status: SessionStatus, onStart: () -> Unit) {
                 Icon(Icons.Default.CheckCircle, null, Modifier.size(34.dp))
                 Spacer(Modifier.width(12.dp))
                 Column {
-                    Text("Debian is ready", style = MaterialTheme.typography.headlineMedium)
-                    Text("Official debian:12-slim • ARM64")
+                    Text(
+                        if (desktopSetupStatus == DesktopSetupStatus.INSTALLED) "Debian desktop is ready" else "Debian is ready",
+                        style = MaterialTheme.typography.headlineMedium,
+                    )
+                    Text(
+                        if (desktopSetupStatus == DesktopSetupStatus.INSTALLED) "XFCE • Debian 12 • ARM64" else "Add XFCE for the full desktop experience",
+                    )
                 }
             }
-            Button(onClick = onStart, enabled = status != SessionStatus.STARTING, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Default.PlayArrow, null)
+            when (desktopSetupStatus) {
+                DesktopSetupStatus.NOT_INSTALLED,
+                DesktopSetupStatus.FAILED,
+                -> Button(onClick = onInstallDesktop, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Outlined.CloudDownload, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Install graphical desktop")
+                }
+                DesktopSetupStatus.INSTALLING -> {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text("Installing XFCE… You can leave this screen open.")
+                }
+                DesktopSetupStatus.INSTALLED -> Button(onClick = onOpenDesktop, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Computer, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (desktopSessionStatus == DesktopSessionStatus.RUNNING) "Return to Linux desktop" else "Launch Linux desktop")
+                }
+            }
+            OutlinedButton(
+                onClick = onStartTerminal,
+                enabled = terminalStatus != SessionStatus.STARTING,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Outlined.Terminal, null)
                 Spacer(Modifier.width(8.dp))
-                Text(if (status == SessionStatus.RUNNING) "Open running terminal" else "Start terminal")
+                Text(if (terminalStatus == SessionStatus.RUNNING) "Open terminal" else "Terminal tools")
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun DesktopPage(
+    linuxInstalled: Boolean,
+    setupStatus: DesktopSetupStatus,
+    sessionStatus: DesktopSessionStatus,
+    setupLog: String,
+    setupError: String?,
+    onInstallLinux: () -> Unit,
+    onInstallDesktop: () -> Unit,
+    onOpenDesktop: () -> Unit,
+) {
+    val logScroll = rememberScrollState()
+    LaunchedEffect(setupLog) { logScroll.scrollTo(logScroll.maxValue) }
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        Text("Your Linux desktop", style = MaterialTheme.typography.displaySmall)
+        Text(
+            "Launch a full Debian XFCE workspace with its own panel, desktop, window manager and Linux applications.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+            shape = RoundedCornerShape(topStart = 44.dp, topEnd = 18.dp, bottomEnd = 44.dp, bottomStart = 18.dp),
+        ) {
+            Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Icon(Icons.Default.Computer, null, Modifier.size(48.dp))
+                when {
+                    !linuxInstalled -> {
+                        Text("Debian is required", style = MaterialTheme.typography.headlineMedium)
+                        Text("Install the base Linux filesystem before adding its graphical desktop.")
+                        Button(onClick = onInstallLinux) { Text("Set up Debian") }
+                    }
+                    setupStatus == DesktopSetupStatus.NOT_INSTALLED || setupStatus == DesktopSetupStatus.FAILED -> {
+                        Text("Install Debian XFCE", style = MaterialTheme.typography.headlineMedium)
+                        Text("One-time APT download. Allow roughly 700 MB of free space. Includes XFCE, TigerVNC, fonts and a Linux terminal.")
+                        setupError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        Button(onClick = onInstallDesktop, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Outlined.CloudDownload, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (setupStatus == DesktopSetupStatus.FAILED) "Retry desktop setup" else "Install graphical desktop")
+                        }
+                    }
+                    setupStatus == DesktopSetupStatus.INSTALLING -> {
+                        LoadingIndicator(Modifier.size(54.dp).align(Alignment.CenterHorizontally))
+                        Text("Installing the desktop", style = MaterialTheme.typography.headlineMedium)
+                        Text("APT is downloading and configuring XFCE. This can take several minutes.")
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Surface(color = Color(0xFF0A1008), contentColor = Color(0xFFD9FFB1), shape = MaterialTheme.shapes.medium) {
+                            Text(
+                                setupLog.takeLast(5_000),
+                                Modifier.fillMaxWidth().height(180.dp).verticalScroll(logScroll).padding(14.dp),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
+                    else -> {
+                        Text("Debian XFCE", style = MaterialTheme.typography.headlineMedium)
+                        Text(if (sessionStatus == DesktopSessionStatus.RUNNING) "Your graphical Linux session is running." else "Ready to boot your graphical Linux workspace.")
+                        Button(onClick = onOpenDesktop, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.PlayArrow, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (sessionStatus == DesktopSessionStatus.RUNNING) "Return to desktop" else "Launch desktop")
+                        }
+                    }
+                }
+            }
+        }
+        Text("The desktop runs locally", style = MaterialTheme.typography.titleLarge)
+        Text(
+            "The display is available only on this device through an authenticated loopback connection. No remote server or cloud VM is involved.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -458,6 +629,7 @@ private fun TerminalPage(
 @Composable
 private fun SettingsPage(
     installState: InstallState,
+    desktopSetupStatus: DesktopSetupStatus,
     shizukuMode: ShizukuMode,
     requestShizuku: () -> Unit,
 ) {
@@ -472,6 +644,17 @@ private fun SettingsPage(
             title = "Linux engine",
             value = if (installState is InstallState.Installed) "PRoot • Debian 12 • ARM64" else "Not installed",
             supporting = "Rootless userland using Android’s existing Linux kernel.",
+        )
+        SettingsCard(
+            icon = Icons.Default.Computer,
+            title = "Graphical desktop",
+            value = when (desktopSetupStatus) {
+                DesktopSetupStatus.INSTALLED -> "XFCE with TigerVNC"
+                DesktopSetupStatus.INSTALLING -> "Installing…"
+                DesktopSetupStatus.FAILED -> "Setup needs attention"
+                DesktopSetupStatus.NOT_INSTALLED -> "Not installed"
+            },
+            supporting = "Rendered inside Lindroid using the bundled noVNC client.",
         )
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {

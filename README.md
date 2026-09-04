@@ -7,7 +7,11 @@ phone's Android kernel; it is not a virtual machine and does not require root.
 
 - Installs the official `debian:12-slim` ARM64 OCI image from Docker Hub.
 - Verifies every downloaded filesystem layer using its SHA-256 digest.
-- Runs a persistent interactive Bash process through an Android-native PRoot.
+- Installs a real XFCE desktop with TigerVNC from Debian's repositories.
+- Opens that desktop full-screen inside Lindroid through a private, authenticated
+  loopback display and the bundled noVNC client.
+- Runs a persistent interactive Bash process through an Android-native PRoot as
+  an optional developer tool.
 - Provides command input, live terminal output, shortcuts, and start/stop controls.
 - Keeps Debian files and `/root/storage` across sessions.
 - Detects optional Shizuku ADB/root access and requests permission when available.
@@ -29,8 +33,9 @@ The initial build targets ARM64 Android 8.0 and newer. The generated APK is in
 
 PRoot supplies a Linux userland on the Android kernel. Rootless mode cannot run
 Docker, load kernel modules, create real mounts, or provide a normal systemd boot.
-Some full-screen terminal programs also require a future PTY-backed terminal
-renderer; the current console is intended for command-oriented workflows.
+The graphical desktop is presented like a VM, but still shares Android's kernel.
+Some full-screen terminal programs require the XFCE terminal because the compact
+in-app command console is intended for command-oriented workflows.
 
 ## Bundled native components
 
