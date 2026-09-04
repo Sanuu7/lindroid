@@ -85,20 +85,33 @@ class DesktopSessionService : Service() {
                 )
                 val running = ProotRuntime.processBuilder(this@DesktopSessionService, command).start()
                 process = running
+                val recentLines = java.util.Collections.synchronizedList(mutableListOf<String>())
 
                 launch {
                     running.inputStream.reader().useLines { lines ->
                         lines.forEach { line ->
-                            if (line.isNotBlank()) DesktopSessionBus.update(
-                                DesktopSessionBus.status.value,
-                                line.take(180),
-                                password,
-                            )
+                            if (line.isNotBlank()) {
+                                recentLines.add(line)
+                                if (recentLines.size > 30) recentLines.removeAt(0)
+                                DesktopSessionBus.update(
+                                    DesktopSessionBus.status.value,
+                                    line.take(180),
+                                    password,
+                                )
+                            }
                         }
                     }
                 }
 
-                check(waitForVnc()) { "The XFCE display did not start in time" }
+                if (!waitForVnc(running)) {
+                    running.destroy()
+                    val hint = if (!running.isAlive && recentLines.isNotEmpty()) {
+                        " Early output: ${recentLines.takeLast(5).joinToString(" | ").take(400)}"
+                    } else {
+                        " Check /root/.vnc/Xtigervnc.log and /root/.vnc/xfce.log in the Debian terminal."
+                    }
+                    error("The XFCE display did not start in time.$hint")
+                }
                 DesktopSessionBus.update(DesktopSessionStatus.RUNNING, "Debian XFCE is running", password)
                 updateNotification("Debian XFCE is running")
 
@@ -126,8 +139,9 @@ class DesktopSessionService : Service() {
         }
     }
 
-    private suspend fun waitForVnc(): Boolean {
+    private suspend fun waitForVnc(process: Process): Boolean {
         repeat(90) {
+            if (!process.isAlive) return false
             val connected = runCatching {
                 Socket().use { socket ->
                     socket.connect(
@@ -216,14 +230,16 @@ class DesktopSessionService : Service() {
             printf '%s\n' "${'$'}LINDROID_VNC_PASSWORD" | "${'$'}PASSWD_BIN" -f > /root/.vnc/passwd
             chmod 600 /root/.vnc/passwd
             test -s /etc/machine-id || dbus-uuidgen --ensure=/etc/machine-id
-            "${'$'}XVNC_BIN" :1 -fg -geometry 1280x720 -depth 24 -dpi 120 -localhost -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -AlwaysShared -ac &
+            "${'$'}XVNC_BIN" :1 -geometry 1280x720 -depth 24 -dpi 120 -localhost -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -AlwaysShared -ac > /root/.vnc/Xtigervnc.log 2>&1 &
             VNC_PID=${'$'}!
             export DISPLAY=:1
             export XDG_RUNTIME_DIR=/tmp/lindroid-runtime
             for attempt in ${'$'}(seq 1 60); do
                 test -S /tmp/.X11-unix/X1 && break
+                kill -0 "${'$'}VNC_PID" 2>/dev/null || { echo "Xtigervnc exited early; see /root/.vnc/Xtigervnc.log"; cat /root/.vnc/Xtigervnc.log; exit 1; }
                 sleep 0.25
             done
+            test -S /tmp/.X11-unix/X1 || { echo "Xtigervnc never created its X socket; see /root/.vnc/Xtigervnc.log"; cat /root/.vnc/Xtigervnc.log; exit 1; }
             dbus-launch --exit-with-session startxfce4 > /root/.vnc/xfce.log 2>&1 &
             wait "${'$'}VNC_PID"
         """
