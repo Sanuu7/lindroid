@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LoadingIndicator
@@ -98,7 +99,11 @@ private fun DesktopScreen(onClose: () -> Unit, onStop: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         when (status) {
             DesktopSessionStatus.RUNNING -> password?.let {
-                NativeDesktop(password = it, reconnectKey = reconnectKey)
+                NativeDesktop(
+                    password = it,
+                    reconnectKey = reconnectKey,
+                    onReconnect = { reconnectKey++ },
+                )
             }
             DesktopSessionStatus.FAILED -> DesktopStatus(
                 title = "Desktop could not start",
@@ -170,7 +175,7 @@ private fun DesktopStatus(
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun NativeDesktop(password: String, reconnectKey: Int) {
+private fun NativeDesktop(password: String, reconnectKey: Int, onReconnect: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var viewRef by remember { mutableStateOf<NativeDesktopView?>(null) }
@@ -199,10 +204,14 @@ private fun NativeDesktop(password: String, reconnectKey: Int) {
         }
     }
 
-    DisposableEffect(password, reconnectKey) {
-        val old = viewRef
+    fun reconnect(view: NativeDesktopView) {
+        view.client?.close()
+        connect(view)
+    }
+
+    DisposableEffect(password) {
         onDispose {
-            old?.client?.close()
+            viewRef?.client?.close()
         }
     }
 
@@ -216,13 +225,11 @@ private fun NativeDesktop(password: String, reconnectKey: Int) {
                         ViewGroup.LayoutParams.MATCH_PARENT,
                     )
                     setBackgroundColor(android.graphics.Color.BLACK)
+                    onConnectionLost = { message ->
+                        error = message ?: "The display connection was lost"
+                        connecting = false
+                    }
                     connect(this)
-                }
-            },
-            update = { view ->
-                if (reconnectKey > 0) {
-                    view.client?.close()
-                    connect(view)
                 }
             },
         )
@@ -237,12 +244,18 @@ private fun NativeDesktop(password: String, reconnectKey: Int) {
             }
         }
 
-        error?.let {
+        error?.let { message ->
             Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.85f)), contentAlignment = Alignment.Center) {
                 Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Display connection dropped", style = MaterialTheme.typography.headlineSmall, color = Color.White)
                     Spacer(Modifier.size(8.dp))
-                    Text(it, color = Color.White.copy(alpha = 0.7f))
+                    Text(message, color = Color.White.copy(alpha = 0.7f))
+                    Spacer(Modifier.size(20.dp))
+                    FilledTonalButton(onClick = { viewRef?.let { reconnect(it) } }) {
+                        Icon(Icons.Default.Refresh, null)
+                        Spacer(Modifier.size(8.dp))
+                        Text("Retry")
+                    }
                 }
             }
         }
@@ -264,8 +277,7 @@ private fun NativeDesktop(password: String, reconnectKey: Int) {
     LaunchedEffect(reconnectKey) {
         if (reconnectKey > 0) {
             viewRef?.let { view ->
-                view.client?.close()
-                connect(view)
+                reconnect(view)
             }
         }
     }

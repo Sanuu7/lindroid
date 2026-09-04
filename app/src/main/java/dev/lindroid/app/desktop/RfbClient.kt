@@ -102,7 +102,7 @@ class RfbClient(
         requestUpdate(incremental = false)
     }
 
-    fun startLoop(onFrame: (Rect) -> Unit) {
+    fun startLoop(onFrame: (Rect) -> Unit, onError: (String?) -> Unit) {
         check(socket != null) { "Call connect first" }
         running = true
         reader = thread(name = "rfb-loop", isDaemon = true) {
@@ -111,7 +111,7 @@ class RfbClient(
                     readServerMessage(onFrame)
                 }
             } catch (error: Exception) {
-                if (running) onFrame(Rect(0, 0, 0, 0))
+                if (running) onError(error.message)
             }
         }
     }
