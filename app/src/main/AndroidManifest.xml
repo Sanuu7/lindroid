@@ -60,5 +60,14 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Runs the user-requested local Debian graphical desktop" />
         </service>
+
+        <service
+            android:name=".runtime.UninstallService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Removes the user-requested Debian desktop or Debian files" />
+        </service>
     </application>
 </manifest>

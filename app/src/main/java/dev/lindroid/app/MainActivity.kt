@@ -104,9 +104,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.lindroid.app.desktop.DesktopActivity
 import dev.lindroid.app.runtime.DesktopSessionStatus
 import dev.lindroid.app.runtime.DesktopSetupStatus
+import dev.lindroid.app.runtime.UninstallBus
+import dev.lindroid.app.runtime.UninstallManager
+import dev.lindroid.app.runtime.UninstallTarget
 import dev.lindroid.app.runtime.InstallState
 import dev.lindroid.app.runtime.SessionStatus
 import dev.lindroid.app.shizuku.ShizukuMode
+import dev.lindroid.app.ui.FilesPage
 import dev.lindroid.app.ui.LindroidTheme
 
 class MainActivity : ComponentActivity() {
@@ -129,6 +133,7 @@ private enum class AppPage(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Default.Home),
     DESKTOP("Desktop", Icons.Default.Computer),
     TERMINAL("Terminal", Icons.Outlined.Terminal),
+    FILES("Files", Icons.Outlined.Folder),
     SETTINGS("Settings", Icons.Default.Settings),
 }
 
@@ -144,9 +149,27 @@ private fun LindroidApp(viewModel: LindroidViewModel) {
     val desktopSetupLog by viewModel.desktopSetupLog.collectAsStateWithLifecycle()
     val desktopSetupError by viewModel.desktopSetupError.collectAsStateWithLifecycle()
     val desktopSessionStatus by viewModel.desktopSessionStatus.collectAsStateWithLifecycle()
+    val sharedEntries by viewModel.sharedEntries.collectAsStateWithLifecycle()
+    val sharedPath by viewModel.sharedPath.collectAsStateWithLifecycle()
+    val sharedNotice by viewModel.sharedNotice.collectAsStateWithLifecycle()
+    val uninstallRunning by UninstallBus.running.collectAsStateWithLifecycle()
+    val uninstallMessage by UninstallBus.message.collectAsStateWithLifecycle()
     var selectedPage by rememberSaveable { mutableIntStateOf(0) }
     var pendingForegroundAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingExport by remember { mutableStateOf<SharedEntry?>(null) }
     val context = LocalContext.current
+
+    val importFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (!uris.isNullOrEmpty()) viewModel.importSharedFiles(uris)
+    }
+    val saveFile = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        val entry = pendingExport
+        if (uri != null && entry != null) viewModel.exportSharedFile(entry, uri)
+        pendingExport = null
+    }
+    LaunchedEffect(selectedPage) {
+        if (selectedPage == AppPage.FILES.ordinal) viewModel.refreshSharedFiles()
+    }
 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -238,7 +261,31 @@ private fun LindroidApp(viewModel: LindroidViewModel) {
                     onClear = viewModel::clearTerminal,
                     onInstall = { selectedPage = AppPage.HOME.ordinal },
                 )
-                AppPage.SETTINGS -> SettingsPage(installState, desktopSetupStatus, shizukuMode, viewModel::requestShizuku)
+                AppPage.FILES -> FilesPage(
+                    entries = sharedEntries,
+                    path = sharedPath,
+                    notice = sharedNotice,
+                    onRefresh = viewModel::refreshSharedFiles,
+                    onOpenDirectory = viewModel::openSharedDirectory,
+                    onUp = viewModel::upSharedDirectory,
+                    onImport = { importFiles.launch(arrayOf("*/*")) },
+                    onExport = { entry ->
+                        pendingExport = entry
+                        saveFile.launch(entry.name)
+                    },
+                    onDelete = viewModel::deleteSharedEntry,
+                    onDismissNotice = viewModel::clearSharedNotice,
+                )
+                AppPage.SETTINGS -> SettingsPage(
+                    installState,
+                    desktopSetupStatus,
+                    shizukuMode,
+                    uninstallRunning,
+                    uninstallMessage,
+                    viewModel::requestShizuku,
+                    onUninstallDesktop = { UninstallManager.uninstall(context, UninstallTarget.DESKTOP) },
+                    onUninstallDebian = { UninstallManager.uninstall(context, UninstallTarget.DEBIAN) },
+                )
             }
         }
     }
@@ -631,8 +678,13 @@ private fun SettingsPage(
     installState: InstallState,
     desktopSetupStatus: DesktopSetupStatus,
     shizukuMode: ShizukuMode,
+    uninstallRunning: Boolean,
+    uninstallMessage: String?,
     requestShizuku: () -> Unit,
+    onUninstallDesktop: () -> Unit,
+    onUninstallDebian: () -> Unit,
 ) {
+    var confirmTarget by remember { mutableStateOf<UninstallTarget?>(null) }
     val context = LocalContext.current
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
@@ -654,7 +706,7 @@ private fun SettingsPage(
                 DesktopSetupStatus.FAILED -> "Setup needs attention"
                 DesktopSetupStatus.NOT_INSTALLED -> "Not installed"
             },
-            supporting = "Rendered inside Lindroid using the bundled noVNC client.",
+            supporting = "Rendered inside Lindroid by its built-in display client.",
         )
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -677,6 +729,53 @@ private fun SettingsPage(
             value = context.filesDir.resolve("shared").absolutePath,
             supporting = "Available inside Debian at /root/storage.",
         )
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Remove Linux", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "Uninstalling Debian erases all Linux files. Removing only the desktop keeps the terminal.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                uninstallMessage?.let { Text(it) }
+                val desktopGone = desktopSetupStatus != DesktopSetupStatus.INSTALLED
+                val debianGone = installState !is InstallState.Installed
+                Button(
+                    onClick = { confirmTarget = UninstallTarget.DESKTOP },
+                    enabled = !desktopGone && !uninstallRunning,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (uninstallRunning) "Working" else "Remove graphical desktop") }
+                OutlinedButton(
+                    onClick = { confirmTarget = UninstallTarget.DEBIAN },
+                    enabled = !debianGone && !uninstallRunning,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Remove Debian and all Linux files") }
+            }
+        }
+        confirmTarget?.let { target ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { confirmTarget = null },
+                title = {
+                    Text(if (target == UninstallTarget.DESKTOP) "Remove the desktop?" else "Remove Debian?")
+                },
+                text = {
+                    Text(
+                        if (target == UninstallTarget.DESKTOP) "XFCE and its display files go away. Your terminal files stay."
+                        else "This erases the whole Linux system and all files inside it.",
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            if (target == UninstallTarget.DESKTOP) onUninstallDesktop() else onUninstallDebian()
+                            confirmTarget = null
+                        },
+                    ) { Text("Remove") }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { confirmTarget = null }) { Text("Keep") }
+                },
+            )
+        }
         HorizontalDivider()
         SettingsCard(
             icon = Icons.Outlined.Info,
