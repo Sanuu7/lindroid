@@ -9,7 +9,11 @@ phone's Android kernel; it is not a virtual machine and does not require root.
 - Verifies every downloaded filesystem layer using its SHA-256 digest.
 - Installs a real XFCE desktop with TigerVNC from Debian's repositories.
 - Opens that desktop full-screen inside Lindroid through a private, authenticated
-  loopback display and the bundled noVNC client.
+  loopback display and its built-in native VNC viewer.
+- Sizes the desktop to the phone's own screen so it renders one-to-one.
+- Shares files between Android and Debian through `/root/storage` with a Files
+  tab for importing, exporting and organizing them.
+- Keeps downloaded Debian layers in a verified cache so reinstalls are offline.
 - Runs a persistent interactive Bash process through an Android-native PRoot as
   an optional developer tool.
 - Provides command input, live terminal output, shortcuts, and start/stop controls.
