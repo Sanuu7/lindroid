@@ -8,6 +8,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FilterInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 
 /**
  * Unpacks a gzipped tar archive into a rootfs directory with the same safety
@@ -49,31 +50,37 @@ internal object RootfsArchive {
                 val entry = tar.nextEntry ?: break
                 val relative = ArchiveSafety.safeRelativePath(entry.name) ?: continue
                 val output = File(destination, relative)
+                try {
+                    if (entry.name.substringAfterLast('/') == ".wh..wh..opq") {
+                        output.parentFile?.listFiles()?.forEach { it.deleteRecursively() }
+                        continue
+                    }
+                    if (entry.name.substringAfterLast('/').startsWith(".wh.")) {
+                        File(output.parentFile, entry.name.substringAfterLast('/').removePrefix(".wh.")).deleteRecursively()
+                        continue
+                    }
 
-                if (entry.name.substringAfterLast('/') == ".wh..wh..opq") {
-                    output.parentFile?.listFiles()?.forEach { it.deleteRecursively() }
-                    continue
-                }
-                if (entry.name.substringAfterLast('/').startsWith(".wh.")) {
-                    File(output.parentFile, entry.name.substringAfterLast('/').removePrefix(".wh.")).deleteRecursively()
-                    continue
-                }
-
-                output.parentFile?.mkdirs()
-                when {
-                    entry.isDirectory -> output.mkdirs()
-                    entry.isSymbolicLink -> {
-                        output.deleteRecursively()
-                        Os.symlink(entry.linkName, output.absolutePath)
+                    output.parentFile?.mkdirs()
+                    when {
+                        entry.isDirectory -> output.mkdirs()
+                        entry.isSymbolicLink -> {
+                            output.deleteRecursively()
+                            Os.symlink(entry.linkName, output.absolutePath)
+                        }
+                        entry.isLink -> {
+                            val target = File(destination, ArchiveSafety.safeRelativePath(entry.linkName) ?: continue)
+                            pendingHardLinks += output to target
+                        }
+                        entry.isFile -> {
+                            FileOutputStream(output).use { tar.copyTo(it) }
+                            runCatching { Os.chmod(output.absolutePath, entry.mode) }
+                        }
                     }
-                    entry.isLink -> {
-                        val target = File(destination, ArchiveSafety.safeRelativePath(entry.linkName) ?: continue)
-                        pendingHardLinks += output to target
-                    }
-                    entry.isFile -> {
-                        FileOutputStream(output).use { tar.copyTo(it) }
-                        runCatching { Os.chmod(output.absolutePath, entry.mode) }
-                    }
+                } catch (error: Throwable) {
+                    throw IOException(
+                        "Entry '${entry.name}' (mode=${entry.mode}, link=${entry.linkName}): ${error.message}",
+                        error,
+                    )
                 }
                 report()
             }

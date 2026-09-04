@@ -97,6 +97,7 @@ class DesktopSetupService : Service() {
                         if (!prebuilt.isFile) downloadPrebuilt(prebuilt)
                         installFromPrebuilt(prebuilt, containerId, flavor)
                     } catch (error: Throwable) {
+                        android.util.Log.e("DesktopSetupService", "Prebuilt install failed", error)
                         DesktopSetupBus.append(
                             "Prebuilt image unavailable (${error.message}); falling back to APT.\n",
                         )
@@ -107,6 +108,7 @@ class DesktopSetupService : Service() {
                 }
             } catch (error: Throwable) {
                 val message = error.message ?: error.javaClass.simpleName
+                android.util.Log.e("DesktopSetupService", "Desktop setup failed", error)
                 DesktopSetupBus.append("Desktop setup failed: $message\n")
                 DesktopSetupBus.status(DesktopSetupStatus.FAILED, message)
             } finally {
@@ -130,8 +132,15 @@ class DesktopSetupService : Service() {
             DesktopSetupBus.append("Downloading… ${"%.0f".format(fraction * 100)}%\n")
         }
         val partial = File(prebuilt.parentFile, prebuilt.name + ".part")
-        verifyPrebuiltDigest(partial)
+        // Rename before verifying: the digest helper expects the sidecar named
+        // exactly like the image plus .sha256.
         check(partial.renameTo(prebuilt)) { "Could not store the desktop image" }
+        try {
+            verifyPrebuiltDigest(prebuilt)
+        } catch (error: Throwable) {
+            prebuilt.delete()
+            throw error
+        }
     }
 
     private fun fetchToFile(url: String, target: File, onProgress: ((Float) -> Unit)?) {
@@ -229,11 +238,12 @@ class DesktopSetupService : Service() {
     }
 
     /**
-     * The desktop packages download and unpack inside the rootfs. Cinnamon on
-     * the Mint flavor needs a larger budget than XFCE.
+     * The desktop download and unpack need real space on the app's filesystem.
+     * Stats the app directory itself: it always exists, unlike a container's
+     * rootfs that may not have been created yet.
      */
     private fun ensureFreeSpace(flavor: DistroFlavor) {
-        val available = StatFs(RuntimePaths(this).rootfs.path).availableBytes
+        val available = StatFs(applicationContext.filesDir.path).availableBytes
         check(available >= flavor.minimumDesktopBytes) {
             val needed = flavor.minimumDesktopBytes / (1024f * 1024f * 1024f)
             val free = available / (1024f * 1024f * 1024f)
