@@ -12,6 +12,7 @@ import dev.lindroid.app.runtime.DesktopSessionBus
 import dev.lindroid.app.runtime.DesktopSessionService
 import dev.lindroid.app.runtime.DesktopSetupBus
 import dev.lindroid.app.runtime.DesktopSetupService
+import dev.lindroid.app.runtime.DesktopSetupStatus
 import dev.lindroid.app.runtime.InstallState
 import dev.lindroid.app.runtime.LinuxSessionService
 import dev.lindroid.app.runtime.LxContainer
@@ -65,6 +66,13 @@ class LindroidViewModel(application: Application) : AndroidViewModel(application
             UninstallBus.completed.collect {
                 refreshContainers()
                 DesktopSetupBus.refresh(app, mutableActiveContainer.value?.id)
+            }
+        }
+        viewModelScope.launch {
+            // A finished desktop setup (including the prebuilt-image path)
+            // implies the base filesystem is present as well.
+            DesktopSetupBus.status.collect { status ->
+                if (status == DesktopSetupStatus.INSTALLED) refreshContainers()
             }
         }
         refreshContainers()

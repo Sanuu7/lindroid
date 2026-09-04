@@ -60,7 +60,7 @@ class RootfsInstaller(context: Context, private val container: LxContainer) {
                     )
                 }
                 report((index + 0.92f) / layers.length(), "Unpacking ${flavor.label} layer $layerNumber")
-                extractLayer(archive, paths.installStage)
+                RootfsArchive.extract(archive, paths.installStage)
             }
 
             configureRootfs(paths.installStage)
@@ -170,49 +170,7 @@ class RootfsInstaller(context: Context, private val container: LxContainer) {
         }
     }
 
-    private fun extractLayer(archive: File, destination: File) {
-        val pendingHardLinks = mutableListOf<Pair<File, File>>()
-        TarArchiveInputStream(
-            GzipCompressorInputStream(BufferedInputStream(FileInputStream(archive))),
-        ).use { tar ->
-            while (true) {
-                val entry = tar.nextEntry ?: break
-                val relative = ArchiveSafety.safeRelativePath(entry.name) ?: continue
-                val output = File(destination, relative)
-
-                if (entry.name.substringAfterLast('/') == ".wh..wh..opq") {
-                    output.parentFile?.listFiles()?.forEach { it.deleteRecursively() }
-                    continue
-                }
-                if (entry.name.substringAfterLast('/').startsWith(".wh.")) {
-                    File(output.parentFile, entry.name.substringAfterLast('/').removePrefix(".wh.")).deleteRecursively()
-                    continue
-                }
-
-                output.parentFile?.mkdirs()
-                when {
-                    entry.isDirectory -> output.mkdirs()
-                    entry.isSymbolicLink -> {
-                        output.deleteRecursively()
-                        Os.symlink(entry.linkName, output.absolutePath)
-                    }
-                    entry.isLink -> {
-                        val target = File(destination, ArchiveSafety.safeRelativePath(entry.linkName) ?: continue)
-                        pendingHardLinks += output to target
-                    }
-                    entry.isFile -> {
-                        FileOutputStream(output).use { tar.copyTo(it) }
-                        runCatching { Os.chmod(output.absolutePath, entry.mode) }
-                    }
-                }
-            }
-        }
-        pendingHardLinks.forEach { (link, target) ->
-            link.deleteRecursively()
-            runCatching { Os.link(target.absolutePath, link.absolutePath) }
-                .getOrElse { target.copyTo(link, overwrite = true) }
-        }
-    }
+    private fun extractLayer(archive: File, destination: File) = RootfsArchive.extract(archive, destination)
 
     private fun configureRootfs(root: File) {
         File(root, "root").mkdirs()

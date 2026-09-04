@@ -15,6 +15,7 @@ enum class DistroFlavor(
     val desktopLabel: String,
     val desktopSessionCommand: String,
     val minimumDesktopBytes: Long,
+    val prebuiltImageName: String? = null,
 ) {
     DEBIAN(
         label = "Debian 12",
@@ -36,6 +37,7 @@ enum class DistroFlavor(
         needsEmulation = true,
         desktopLabel = "Xfce",
         desktopSessionCommand = "dbus-launch --exit-with-session startxfce4",
-        minimumDesktopBytes = 2_500_000_000L,
+        minimumDesktopBytes = 3_500_000_000L,
+        prebuiltImageName = "linux-mint-22-desktop.tar.gz",
     ),
 }

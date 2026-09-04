@@ -18,6 +18,13 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 
 enum class DesktopSetupStatus {
     NOT_INSTALLED,
@@ -61,6 +68,10 @@ object DesktopSetupBus {
 class DesktopSetupService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var process: Process? = null
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .build()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -75,27 +86,24 @@ class DesktopSetupService : Service() {
         createChannel()
         startForeground(NOTIFICATION_ID, notification("Installing the ${flavor.label} desktop…"))
         DesktopSetupBus.status(DesktopSetupStatus.INSTALLING)
-        DesktopSetupBus.append("Preparing the ${flavor.desktopLabel} desktop. This is a one-time download.\n")
+        DesktopSetupBus.append("Preparing the ${flavor.desktopLabel} desktop.\n")
 
         scope.launch {
             try {
                 ensureFreeSpace(flavor)
-                val command = ProotRuntime.cleanEnvironment(
-                    listOf("/bin/bash", "-lc", setupScript(flavor)),
-                )
-                val running = ProotRuntime.processBuilder(this@DesktopSetupService, command, containerId).start()
-                process = running
-                running.inputStream.reader().useLines { lines ->
-                    lines.forEach { DesktopSetupBus.append("$it\n") }
-                }
-                val exit = running.waitFor()
-                val installed = exit == 0 &&
-                    RuntimePaths(this@DesktopSetupService, containerId).rootfs.resolve(DesktopSetupBus.DESKTOP_MARKER).isFile
-                if (installed) {
-                    DesktopSetupBus.append("Desktop installation complete.\n")
-                    DesktopSetupBus.status(DesktopSetupStatus.INSTALLED)
+                val prebuilt = RuntimePaths(this@DesktopSetupService).prebuiltImage(flavor)
+                if (prebuilt != null) {
+                    try {
+                        if (!prebuilt.isFile) downloadPrebuilt(prebuilt)
+                        installFromPrebuilt(prebuilt, containerId, flavor)
+                    } catch (error: Throwable) {
+                        DesktopSetupBus.append(
+                            "Prebuilt image unavailable (${error.message}); falling back to APT.\n",
+                        )
+                        installFromApt(containerId, flavor)
+                    }
                 } else {
-                    error("APT exited with code $exit")
+                    installFromApt(containerId, flavor)
                 }
             } catch (error: Throwable) {
                 val message = error.message ?: error.javaClass.simpleName
@@ -106,6 +114,117 @@ class DesktopSetupService : Service() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
+        }
+    }
+
+    /**
+     * The image is published as release assets on the project repository and
+     * can also be sideloaded into the prebuilt folder. A 522 MB image downloads
+     * in minutes; unpacking it is plain host-side Java.
+     */
+    private suspend fun downloadPrebuilt(prebuilt: File) {
+        DesktopSetupBus.append("Downloading the prebuilt desktop image…\n")
+        val sidecar = File(prebuilt.parentFile, prebuilt.name + ".sha256")
+        fetchToFile("$PREBUILT_BASE${prebuilt.name}.sha256", sidecar, null)
+        fetchToFile("$PREBUILT_BASE${prebuilt.name}", File(prebuilt.parentFile, prebuilt.name + ".part")) { fraction ->
+            DesktopSetupBus.append("Downloading… ${"%.0f".format(fraction * 100)}%\n")
+        }
+        val partial = File(prebuilt.parentFile, prebuilt.name + ".part")
+        verifyPrebuiltDigest(partial)
+        check(partial.renameTo(prebuilt)) { "Could not store the desktop image" }
+    }
+
+    private fun fetchToFile(url: String, target: File, onProgress: ((Float) -> Unit)?) {
+        val request = Request.Builder().url(url).header("User-Agent", "Lindroid/0.1 (Android; arm64)").build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+            val body = response.body ?: throw IOException("empty response")
+            val total = body.contentLength().takeIf { it > 0 } ?: -1L
+            body.byteStream().use { input ->
+                FileOutputStream(target).use { output ->
+                    val buffer = ByteArray(1 shl 19)
+                    var copied = 0L
+                    var lastPercent = -10
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        copied += count
+                        if (onProgress != null && total > 0) {
+                            val percent = ((copied * 100) / total).toInt()
+                            if (percent >= lastPercent + 5) {
+                                lastPercent = percent
+                                onProgress(percent / 100f)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Fast path: the flavor ships a ready-made desktop image (built natively
+     * on an x86_64 machine, where no emulation is involved). Unpacking it is
+     * plain host-side Java and takes about the download time.
+     */
+    private suspend fun installFromPrebuilt(prebuilt: File, containerId: String, flavor: DistroFlavor) {
+        val paths = RuntimePaths(this, containerId)
+        verifyPrebuiltDigest(prebuilt)
+        DesktopSetupBus.append("Unpacking the prebuilt ${flavor.label} desktop image.\n")
+        paths.rootfs.deleteRecursively()
+        check(paths.rootfs.mkdirs()) { "Could not prepare the container directory" }
+        RootfsArchive.extract(prebuilt, paths.rootfs) { fraction ->
+            DesktopSetupBus.append("Unpacking… ${"%.0f".format(fraction * 100)}%\n")
+        }
+        check(paths.marker.isFile) { "The image is missing its install marker" }
+        check(paths.rootfs.resolve(DesktopSetupBus.DESKTOP_MARKER).isFile) {
+            "The image is missing the desktop marker"
+        }
+        DesktopSetupBus.append("Desktop installation complete.\n")
+        DesktopSetupBus.status(DesktopSetupStatus.INSTALLED)
+        // The unpacked system is on disk; the 522 MB image is only needed again
+        // after a reinstall, so free the space.
+        prebuilt.delete()
+        File(prebuilt.parentFile, prebuilt.name + ".sha256").delete()
+    }
+
+    /** The image must carry a matching `<name>.sha256` sidecar file. */
+    private fun verifyPrebuiltDigest(file: File) {
+        val sidecar = File(file.parentFile, file.name + ".sha256")
+        check(sidecar.isFile) { "Missing ${sidecar.name} next to the desktop image" }
+        val expected = sidecar.readText().trim().split(Regex("\\s+")).first().lowercase()
+        val hash = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(1 shl 20)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                hash.update(buffer, 0, count)
+            }
+        }
+        val actual = hash.digest().joinToString("") { "%02x".format(it) }
+        check(actual == expected) { "The desktop image checksum does not match ${sidecar.name}" }
+    }
+
+    private suspend fun installFromApt(containerId: String, flavor: DistroFlavor) {
+        DesktopSetupBus.append("No prebuilt image found; installing through APT. This is a one-time download.\n")
+        val command = ProotRuntime.cleanEnvironment(
+            listOf("/bin/bash", "-lc", setupScript(flavor)),
+        )
+        val running = ProotRuntime.processBuilder(this@DesktopSetupService, command, containerId).start()
+        process = running
+        running.inputStream.reader().useLines { lines ->
+            lines.forEach { DesktopSetupBus.append("$it\n") }
+        }
+        val exit = running.waitFor()
+        val installed = exit == 0 &&
+            RuntimePaths(this@DesktopSetupService, containerId).rootfs.resolve(DesktopSetupBus.DESKTOP_MARKER).isFile
+        if (installed) {
+            DesktopSetupBus.append("Desktop installation complete.\n")
+            DesktopSetupBus.status(DesktopSetupStatus.INSTALLED)
+        } else {
+            error("APT exited with code $exit")
         }
     }
 
@@ -162,6 +281,9 @@ class DesktopSetupService : Service() {
         private const val NOTIFICATION_ID = 1202
         private const val EXTRA_CONTAINER = "container"
 
+        /** Release assets on the project repository: the tarball plus its .sha256 sidecar. */
+        private const val PREBUILT_BASE = "https://github.com/Sanuu7/lindroid/releases/download/mint-xfce-v1/"
+
         private val DEBIAN_SETUP_SCRIPT = """
             set -e
             export DEBIAN_FRONTEND=noninteractive
@@ -183,7 +305,17 @@ class DesktopSetupService : Service() {
             apt-get update
             apt-get install -y linuxmint-keyring || true
             apt-get update
-            apt-get install -y --no-install-recommends mint-meta-xfce xfce4-terminal dbus-x11 tigervnc-standalone-server tigervnc-tools xfonts-base fonts-dejavu-core adwaita-icon-theme
+            apt-get install -y --no-install-recommends mint-meta-xfce xfce4-terminal dbus-x11 tigervnc-standalone-server tigervnc-tools xfonts-base fonts-dejavu-core adwaita-icon-theme || true
+            for round in 1 2 3 4 5 6; do
+              out=${'$'}(dpkg --configure -a 2>&1) || true
+              failed=${'$'}(printf '%s\n' "${'$'}out" | sed -n 's/^dpkg: error processing package \([^ ]*\).*/\1/p' | sort -u)
+              if test -z "${'$'}failed"; then break; fi
+              for p in ${'$'}failed; do
+                f=/var/lib/dpkg/info/${'$'}p.postinst
+                test -f "${'$'}f" && printf '#!/bin/sh\nexit 0\n' > "${'$'}f"
+              done
+            done
+            dpkg --configure -a || true
             apt-get clean
             rm -rf /var/lib/apt/lists/*
             mkdir -p /root/.config /root/Desktop
