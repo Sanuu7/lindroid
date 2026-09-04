@@ -88,6 +88,7 @@ class DesktopSessionService : Service() {
                         "LINDROID_VNC_PASSWORD" to password,
                         "LINDROID_VNC_GEOMETRY" to geometry,
                         "LINDROID_VNC_DPI" to dpi.toString(),
+                        "SYSTEMD_OFFLINE" to "1",
                     ),
                 )
                 val running = ProotRuntime.processBuilder(this@DesktopSessionService, command, containerId).start()
@@ -204,6 +205,9 @@ class DesktopSessionService : Service() {
             sleep 0.25
         done
         test -S /tmp/.X11-unix/X1 || { echo "Xtigervnc never created its X socket; see /root/.vnc/Xtigervnc.log"; cat /root/.vnc/Xtigervnc.log; exit 1; }
+        if test -x /usr/bin/systemctl; then
+            printf '#!/bin/sh\nexit 0\n' > /usr/bin/systemctl
+        fi
         ${flavor.desktopSessionCommand} > /root/.vnc/desktop.log 2>&1 &
         wait "${'$'}VNC_PID"
     """
