@@ -29,13 +29,13 @@ enum class DistroFlavor(
     ),
     MINT(
         label = "Linux Mint 22",
-        description = "Ubuntu 24.04 base with the real Mint repositories, translated to ARM through QEMU. Experimental: x86_64 software runs emulated and is noticeably slower.",
+        description = "Ubuntu 24.04 base with the real Mint repositories, Xfce edition. Experimental: x86_64 software runs emulated through QEMU and is noticeably slower.",
         registryRepository = "library/ubuntu",
         registryTag = "24.04",
         architecture = "amd64",
         needsEmulation = true,
-        desktopLabel = "Cinnamon",
-        desktopSessionCommand = "dbus-launch --exit-with-session cinnamon-session",
-        minimumDesktopBytes = 2_800_000_000L,
+        desktopLabel = "Xfce",
+        desktopSessionCommand = "dbus-launch --exit-with-session startxfce4",
+        minimumDesktopBytes = 2_500_000_000L,
     ),
 }

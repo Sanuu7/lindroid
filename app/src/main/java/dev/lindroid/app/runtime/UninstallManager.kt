@@ -150,7 +150,7 @@ class UninstallService : Service() {
         DistroFlavor.MINT -> """
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            apt-get purge -y mint-meta-cinnamon
+            apt-get purge -y mint-meta-xfce
             apt-get autoremove -y --purge
             apt-get clean
             rm -rf /var/lib/apt/lists/*

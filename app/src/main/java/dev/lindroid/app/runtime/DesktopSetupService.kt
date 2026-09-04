@@ -183,7 +183,7 @@ class DesktopSetupService : Service() {
             apt-get update
             apt-get install -y linuxmint-keyring || true
             apt-get update
-            apt-get install -y mint-meta-cinnamon dbus-x11 tigervnc-standalone-server tigervnc-tools xfonts-base fonts-dejavu-core adwaita-icon-theme
+            apt-get install -y --no-install-recommends mint-meta-xfce xfce4-terminal dbus-x11 tigervnc-standalone-server tigervnc-tools xfonts-base fonts-dejavu-core adwaita-icon-theme
             apt-get clean
             rm -rf /var/lib/apt/lists/*
             mkdir -p /root/.config /root/Desktop

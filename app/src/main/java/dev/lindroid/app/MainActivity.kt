@@ -660,7 +660,7 @@ private fun DesktopPage(
                         Text("Install ${flavor.desktopLabel}", style = MaterialTheme.typography.headlineMedium)
                         Text(
                             if (flavor == DistroFlavor.MINT) {
-                                "One-time APT download of the real Mint repositories. Allow roughly 3 GB of free space. Expect slower installs: everything runs through the x86_64 emulator."
+                                "One-time APT download of the real Mint repositories, Xfce edition. Allow roughly 2.5 GB of free space. Expect slower installs: everything runs through the x86_64 emulator."
                             } else {
                                 "One-time APT download. Allow roughly 700 MB of free space. Includes XFCE, TigerVNC, fonts and a Linux terminal."
                             },

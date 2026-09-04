@@ -8,12 +8,12 @@ Android kernel; it is not a virtual machine and does not require root.
 - Supports multiple isolated containers, each with its own rootfs; installing,
   removing or switching containers never touches the others.
 - Installs the official `debian:12-slim` ARM64 OCI image from Docker Hub.
-- Offers an experimental Linux Mint 22 (Cinnamon) container: an `ubuntu:24.04`
-  AMD64 base running through the bundled QEMU user-mode emulator, with the real
-  Mint package repositories on top.
+- Offers an experimental Linux Mint 22 container (the light Xfce edition): an
+  `ubuntu:24.04` AMD64 base running through the bundled QEMU user-mode emulator,
+  with the real Mint package repositories on top.
 - Verifies every downloaded filesystem layer using its SHA-256 digest.
-- Installs a real XFCE (Debian) or Cinnamon (Mint) desktop with TigerVNC from
-  the container's repositories.
+- Installs a real XFCE desktop (Debian, and Mint's Xfce edition) with TigerVNC
+  from the container's repositories.
 - Opens the desktop full-screen inside Lindroid through a private, authenticated
   loopback display and its built-in native VNC viewer.
 - Sizes the desktop to the phone's own screen so it renders one-to-one.
