@@ -38,10 +38,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ClearAll
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
@@ -75,6 +77,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -104,11 +107,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.lindroid.app.desktop.DesktopActivity
 import dev.lindroid.app.runtime.DesktopSessionStatus
 import dev.lindroid.app.runtime.DesktopSetupStatus
-import dev.lindroid.app.runtime.UninstallBus
-import dev.lindroid.app.runtime.UninstallManager
-import dev.lindroid.app.runtime.UninstallTarget
+import dev.lindroid.app.runtime.DistroFlavor
+import dev.lindroid.app.runtime.LxContainer
 import dev.lindroid.app.runtime.InstallState
 import dev.lindroid.app.runtime.SessionStatus
+import dev.lindroid.app.runtime.UninstallBus
+import dev.lindroid.app.runtime.UninstallTarget
 import dev.lindroid.app.shizuku.ShizukuMode
 import dev.lindroid.app.ui.FilesPage
 import dev.lindroid.app.ui.LindroidTheme
@@ -149,6 +153,9 @@ private fun LindroidApp(viewModel: LindroidViewModel) {
     val desktopSetupLog by viewModel.desktopSetupLog.collectAsStateWithLifecycle()
     val desktopSetupError by viewModel.desktopSetupError.collectAsStateWithLifecycle()
     val desktopSessionStatus by viewModel.desktopSessionStatus.collectAsStateWithLifecycle()
+    val containers by viewModel.containers.collectAsStateWithLifecycle()
+    val activeContainer by viewModel.activeContainer.collectAsStateWithLifecycle()
+    val containerStates by viewModel.containerStates.collectAsStateWithLifecycle()
     val sharedEntries by viewModel.sharedEntries.collectAsStateWithLifecycle()
     val sharedPath by viewModel.sharedPath.collectAsStateWithLifecycle()
     val sharedNotice by viewModel.sharedNotice.collectAsStateWithLifecycle()
@@ -235,12 +242,18 @@ private fun LindroidApp(viewModel: LindroidViewModel) {
                     sessionStatus = sessionStatus,
                     desktopSetupStatus = desktopSetupStatus,
                     desktopSessionStatus = desktopSessionStatus,
-                    onInstall = viewModel::installDebian,
+                    containers = containers,
+                    containerStates = containerStates,
+                    activeContainer = activeContainer,
+                    onInstall = viewModel::installRootfs,
                     onInstallDesktop = installDesktop,
                     onOpenDesktop = openDesktop,
                     onStartTerminal = startSession,
+                    onSelectContainer = viewModel::selectContainer,
+                    onCreateContainer = viewModel::createContainer,
                 )
                 AppPage.DESKTOP -> DesktopPage(
+                    container = activeContainer,
                     linuxInstalled = installState is InstallState.Installed,
                     setupStatus = desktopSetupStatus,
                     sessionStatus = desktopSessionStatus,
@@ -255,6 +268,7 @@ private fun LindroidApp(viewModel: LindroidViewModel) {
                     output = output,
                     status = sessionStatus,
                     error = sessionError,
+                    title = activeContainer?.let { "${it.name} terminal" } ?: "Terminal",
                     onStart = startSession,
                     onStop = viewModel::stopSession,
                     onSend = viewModel::sendCommand,
@@ -278,13 +292,18 @@ private fun LindroidApp(viewModel: LindroidViewModel) {
                 )
                 AppPage.SETTINGS -> SettingsPage(
                     installState,
+                    activeContainer,
+                    containers,
+                    containerStates,
                     desktopSetupStatus,
                     shizukuMode,
                     uninstallRunning,
                     uninstallMessage,
                     viewModel::requestShizuku,
-                    onUninstallDesktop = { UninstallManager.uninstall(context, UninstallTarget.DESKTOP) },
-                    onUninstallDebian = { UninstallManager.uninstall(context, UninstallTarget.DEBIAN) },
+                    onRemoveDesktop = viewModel::removeDesktop,
+                    onRemoveContainer = viewModel::removeActiveContainer,
+                    onDeleteContainer = viewModel::deleteContainer,
+                    onSelectContainer = viewModel::selectContainer,
                 )
             }
         }
@@ -310,11 +329,17 @@ private fun HomePage(
     sessionStatus: SessionStatus,
     desktopSetupStatus: DesktopSetupStatus,
     desktopSessionStatus: DesktopSessionStatus,
+    containers: List<LxContainer>,
+    containerStates: Map<String, InstallState>,
+    activeContainer: LxContainer?,
     onInstall: () -> Unit,
     onInstallDesktop: () -> Unit,
     onOpenDesktop: () -> Unit,
     onStartTerminal: () -> Unit,
+    onSelectContainer: (String) -> Unit,
+    onCreateContainer: (String, DistroFlavor) -> Unit,
 ) {
+    val flavor = activeContainer?.flavor ?: DistroFlavor.DEBIAN
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -323,19 +348,20 @@ private fun HomePage(
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
         Text(
-            text = if (installState is InstallState.Installed) "Linux, right in\nyour pocket." else "Bring Debian\nto Android.",
+            text = if (installState is InstallState.Installed) "Linux, right in\nyour pocket." else "Bring Linux\nto Android.",
             style = MaterialTheme.typography.displaySmall,
         )
         Text(
-            "A private ARM64 Linux userland powered by PRoot. No root required; your files stay inside Lindroid.",
+            "A private Linux userland powered by PRoot${if (flavor.needsEmulation) " and QEMU" else ""}. No root required; your files stay inside Lindroid.",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         when (installState) {
-            InstallState.NotInstalled -> InstallCard(onInstall)
+            InstallState.NotInstalled -> InstallCard(flavor, onInstall)
             is InstallState.Installing -> InstallingCard(installState)
             InstallState.Installed -> ReadyCard(
+                flavor,
                 sessionStatus,
                 desktopSetupStatus,
                 desktopSessionStatus,
@@ -352,25 +378,152 @@ private fun HomePage(
             FeatureChip(Icons.Outlined.Android, "Android kernel")
         }
 
+        ContainersSection(
+            containers = containers,
+            containerStates = containerStates,
+            activeContainer = activeContainer,
+            onSelectContainer = onSelectContainer,
+            onCreateContainer = onCreateContainer,
+        )
+
         Text("Your Linux machine", style = MaterialTheme.typography.titleLarge)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            FeatureCard(Icons.Default.ViewInAr, "XFCE desktop", "A real graphical Linux workspace inside the container.", Modifier.weight(1f))
+            FeatureCard(Icons.Default.ViewInAr, "${flavor.desktopLabel} desktop", "A real graphical Linux workspace inside the container.", Modifier.weight(1f))
             FeatureCard(Icons.Outlined.Folder, "Persistent", "Keep apps, settings and files between sessions.", Modifier.weight(1f))
         }
         Spacer(Modifier.height(8.dp))
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun InstallCard(onInstall: () -> Unit) {
+private fun ContainersSection(
+    containers: List<LxContainer>,
+    containerStates: Map<String, InstallState>,
+    activeContainer: LxContainer?,
+    onSelectContainer: (String) -> Unit,
+    onCreateContainer: (String, DistroFlavor) -> Unit,
+) {
+    var showCreate by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Containers", style = MaterialTheme.typography.titleLarge)
+        containers.forEach { container ->
+            val state = containerStates[container.id]
+            ContainerRow(
+                container = container,
+                active = container.id == activeContainer?.id,
+                installed = state is InstallState.Installed,
+                onSelect = { onSelectContainer(container.id) },
+            )
+        }
+        OutlinedButton(onClick = { showCreate = true }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Default.Add, null)
+            Spacer(Modifier.width(8.dp))
+            Text("New container")
+        }
+    }
+    if (showCreate) {
+        CreateContainerDialog(
+            onDismiss = { showCreate = false },
+            onCreate = { name, flavor ->
+                showCreate = false
+                onCreateContainer(name, flavor)
+            },
+        )
+    }
+}
+
+@Composable
+private fun ContainerRow(
+    container: LxContainer,
+    active: Boolean,
+    installed: Boolean,
+    onSelect: () -> Unit,
+) {
+    Card(
+        onClick = onSelect,
+        colors = CardDefaults.cardColors(
+            containerColor = if (active) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer,
+        ),
+    ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                Icons.Default.ViewInAr,
+                null,
+                Modifier.size(24.dp),
+                tint = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(container.name, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "${container.flavor.label} • ${if (installed) "installed" else "not installed"}" +
+                        if (container.flavor.needsEmulation) " • x86_64 emulated" else "",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (active) {
+                AssistChip(onClick = {}, label = { Text("Active") })
+            }
+        }
+    }
+}
+
+@Composable
+private fun CreateContainerDialog(onDismiss: () -> Unit, onCreate: (String, DistroFlavor) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var flavor by remember { mutableStateOf(DistroFlavor.DEBIAN) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New container") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    placeholder = { Text("My Linux box") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                DistroFlavor.entries.forEach { candidate ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = flavor == candidate, onClick = { flavor = candidate })
+                        Column(Modifier.weight(1f)) {
+                            Text(candidate.label, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                candidate.description,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onCreate(name, flavor) }) { Text("Create") }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
+private fun InstallCard(flavor: DistroFlavor, onInstall: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         shape = RoundedCornerShape(topStart = 44.dp, topEnd = 18.dp, bottomEnd = 44.dp, bottomStart = 18.dp),
     ) {
         Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Icon(Icons.Outlined.CloudDownload, null, Modifier.size(36.dp))
-            Text("Install Debian 12", style = MaterialTheme.typography.headlineMedium)
-            Text("Downloads the verified official Debian 12 slim image. Allow about 150 MB of free space.")
+            Text("Install ${flavor.label}", style = MaterialTheme.typography.headlineMedium)
+            Text(flavor.description + " Downloads a verified official image.")
             Button(onClick = onInstall, modifier = Modifier.fillMaxWidth()) {
                 Text("Download and install")
             }
@@ -403,6 +556,7 @@ private fun InstallingCard(state: InstallState.Installing) {
 
 @Composable
 private fun ReadyCard(
+    flavor: DistroFlavor,
     terminalStatus: SessionStatus,
     desktopSetupStatus: DesktopSetupStatus,
     desktopSessionStatus: DesktopSessionStatus,
@@ -420,11 +574,15 @@ private fun ReadyCard(
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(
-                        if (desktopSetupStatus == DesktopSetupStatus.INSTALLED) "Debian desktop is ready" else "Debian is ready",
+                        if (desktopSetupStatus == DesktopSetupStatus.INSTALLED) "The ${flavor.label} desktop is ready" else "${flavor.label} is ready",
                         style = MaterialTheme.typography.headlineMedium,
                     )
                     Text(
-                        if (desktopSetupStatus == DesktopSetupStatus.INSTALLED) "XFCE • Debian 12 • ARM64" else "Add XFCE for the full desktop experience",
+                        if (desktopSetupStatus == DesktopSetupStatus.INSTALLED) {
+                            "${flavor.desktopLabel} • ${flavor.label}${if (flavor.needsEmulation) " • x86_64 emulated" else " • ARM64"}"
+                        } else {
+                            "Add ${flavor.desktopLabel} for the full desktop experience"
+                        },
                     )
                 }
             }
@@ -438,7 +596,7 @@ private fun ReadyCard(
                 }
                 DesktopSetupStatus.INSTALLING -> {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Text("Installing XFCE… You can leave this screen open.")
+                    Text("Installing ${flavor.desktopLabel}… You can leave this screen open.")
                 }
                 DesktopSetupStatus.INSTALLED -> Button(onClick = onOpenDesktop, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.Computer, null)
@@ -462,6 +620,7 @@ private fun ReadyCard(
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun DesktopPage(
+    container: LxContainer?,
     linuxInstalled: Boolean,
     setupStatus: DesktopSetupStatus,
     sessionStatus: DesktopSessionStatus,
@@ -471,6 +630,8 @@ private fun DesktopPage(
     onInstallDesktop: () -> Unit,
     onOpenDesktop: () -> Unit,
 ) {
+    val flavor = container?.flavor ?: DistroFlavor.DEBIAN
+    val name = container?.name ?: "this container"
     val logScroll = rememberScrollState()
     LaunchedEffect(setupLog) { logScroll.scrollTo(logScroll.maxValue) }
     Column(
@@ -479,7 +640,7 @@ private fun DesktopPage(
     ) {
         Text("Your Linux desktop", style = MaterialTheme.typography.displaySmall)
         Text(
-            "Launch a full Debian XFCE workspace with its own panel, desktop, window manager and Linux applications.",
+            "Launch a full ${flavor.label} ${flavor.desktopLabel} workspace with its own panel, desktop, window manager and Linux applications.",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -491,13 +652,19 @@ private fun DesktopPage(
                 Icon(Icons.Default.Computer, null, Modifier.size(48.dp))
                 when {
                     !linuxInstalled -> {
-                        Text("Debian is required", style = MaterialTheme.typography.headlineMedium)
-                        Text("Install the base Linux filesystem before adding its graphical desktop.")
-                        Button(onClick = onInstallLinux) { Text("Set up Debian") }
+                        Text("Not installed yet", style = MaterialTheme.typography.headlineMedium)
+                        Text("Install the base Linux filesystem for $name before adding its graphical desktop.")
+                        Button(onClick = onInstallLinux) { Text("Set up the container") }
                     }
                     setupStatus == DesktopSetupStatus.NOT_INSTALLED || setupStatus == DesktopSetupStatus.FAILED -> {
-                        Text("Install Debian XFCE", style = MaterialTheme.typography.headlineMedium)
-                        Text("One-time APT download. Allow roughly 700 MB of free space. Includes XFCE, TigerVNC, fonts and a Linux terminal.")
+                        Text("Install ${flavor.desktopLabel}", style = MaterialTheme.typography.headlineMedium)
+                        Text(
+                            if (flavor == DistroFlavor.MINT) {
+                                "One-time APT download of the real Mint repositories. Allow roughly 3 GB of free space. Expect slower installs: everything runs through the x86_64 emulator."
+                            } else {
+                                "One-time APT download. Allow roughly 700 MB of free space. Includes XFCE, TigerVNC, fonts and a Linux terminal."
+                            },
+                        )
                         setupError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         Button(onClick = onInstallDesktop, modifier = Modifier.fillMaxWidth()) {
                             Icon(Icons.Outlined.CloudDownload, null)
@@ -508,7 +675,7 @@ private fun DesktopPage(
                     setupStatus == DesktopSetupStatus.INSTALLING -> {
                         LoadingIndicator(Modifier.size(54.dp).align(Alignment.CenterHorizontally))
                         Text("Installing the desktop", style = MaterialTheme.typography.headlineMedium)
-                        Text("APT is downloading and configuring XFCE. This can take several minutes.")
+                        Text("APT is downloading and configuring ${flavor.desktopLabel}. This can take several minutes${if (flavor.needsEmulation) " longer under emulation" else ""}.")
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                         Surface(color = Color(0xFF0A1008), contentColor = Color(0xFFD9FFB1), shape = MaterialTheme.shapes.medium) {
                             Text(
@@ -520,7 +687,7 @@ private fun DesktopPage(
                         }
                     }
                     else -> {
-                        Text("Debian XFCE", style = MaterialTheme.typography.headlineMedium)
+                        Text("${flavor.label} ${flavor.desktopLabel}", style = MaterialTheme.typography.headlineMedium)
                         Text(if (sessionStatus == DesktopSessionStatus.RUNNING) "Your graphical Linux session is running." else "Ready to boot your graphical Linux workspace.")
                         Button(onClick = onOpenDesktop, modifier = Modifier.fillMaxWidth()) {
                             Icon(Icons.Default.PlayArrow, null)
@@ -576,6 +743,7 @@ private fun TerminalPage(
     output: String,
     status: SessionStatus,
     error: String?,
+    title: String,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onSend: (String) -> Unit,
@@ -609,7 +777,7 @@ private fun TerminalPage(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Column {
-                Text("Debian terminal", style = MaterialTheme.typography.titleLarge)
+                Text(title, style = MaterialTheme.typography.titleLarge)
                 Text(statusLabel(status), style = MaterialTheme.typography.bodyMedium, color = statusColor(status))
             }
             Row {
@@ -676,32 +844,71 @@ private fun TerminalPage(
 @Composable
 private fun SettingsPage(
     installState: InstallState,
+    activeContainer: LxContainer?,
+    containers: List<LxContainer>,
+    containerStates: Map<String, InstallState>,
     desktopSetupStatus: DesktopSetupStatus,
     shizukuMode: ShizukuMode,
     uninstallRunning: Boolean,
     uninstallMessage: String?,
     requestShizuku: () -> Unit,
-    onUninstallDesktop: () -> Unit,
-    onUninstallDebian: () -> Unit,
+    onRemoveDesktop: () -> Unit,
+    onRemoveContainer: () -> Unit,
+    onDeleteContainer: (String) -> Unit,
+    onSelectContainer: (String) -> Unit,
 ) {
     var confirmTarget by remember { mutableStateOf<UninstallTarget?>(null) }
+    var deleteContainerTarget by remember { mutableStateOf<LxContainer?>(null) }
     val context = LocalContext.current
+    val flavor = activeContainer?.flavor ?: DistroFlavor.DEBIAN
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("Settings", style = MaterialTheme.typography.displaySmall)
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Containers", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "Each container is a separate Linux system. They share nothing but the Files folder.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                containers.forEach { container ->
+                    val installed = containerStates[container.id] is InstallState.Installed
+                    val active = container.id == activeContainer?.id
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(container.name, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "${container.flavor.label} • ${if (installed) "installed" else "not installed"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (active) {
+                            AssistChip(onClick = {}, label = { Text("Active") })
+                        } else {
+                            AssistChip(onClick = { onSelectContainer(container.id) }, label = { Text("Use") })
+                            IconButton(onClick = { deleteContainerTarget = container }) {
+                                Icon(Icons.Default.Delete, "Delete ${container.name}")
+                            }
+                        }
+                    }
+                }
+            }
+        }
         SettingsCard(
             icon = Icons.Default.Memory,
             title = "Linux engine",
-            value = if (installState is InstallState.Installed) "PRoot • Debian 12 • ARM64" else "Not installed",
-            supporting = "Rootless userland using Android’s existing Linux kernel.",
+            value = if (installState is InstallState.Installed) "PRoot • ${flavor.label}${if (flavor.needsEmulation) " • QEMU x86_64" else " • ARM64"}" else "Not installed",
+            supporting = "Rootless userland using Android's existing Linux kernel.",
         )
         SettingsCard(
             icon = Icons.Default.Computer,
             title = "Graphical desktop",
             value = when (desktopSetupStatus) {
-                DesktopSetupStatus.INSTALLED -> "XFCE with TigerVNC"
+                DesktopSetupStatus.INSTALLED -> "${flavor.desktopLabel} with TigerVNC"
                 DesktopSetupStatus.INSTALLING -> "Installing…"
                 DesktopSetupStatus.FAILED -> "Setup needs attention"
                 DesktopSetupStatus.NOT_INSTALLED -> "Not installed"
@@ -727,13 +934,13 @@ private fun SettingsPage(
             icon = Icons.Outlined.Folder,
             title = "Shared files",
             value = context.filesDir.resolve("shared").absolutePath,
-            supporting = "Available inside Debian at /root/storage.",
+            supporting = "Available inside every container at /root/storage.",
         )
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Remove Linux", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Uninstalling Debian erases all Linux files. Removing only the desktop keeps the terminal.",
+                    "These act on ${activeContainer?.name ?: "the active container"}. Removing only the desktop keeps the terminal.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 uninstallMessage?.let { Text(it) }
@@ -748,25 +955,25 @@ private fun SettingsPage(
                     onClick = { confirmTarget = UninstallTarget.DEBIAN },
                     enabled = !debianGone && !uninstallRunning,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Remove Debian and all Linux files") }
+                ) { Text("Remove ${activeContainer?.name ?: "the container"} and all its files") }
             }
         }
         confirmTarget?.let { target ->
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { confirmTarget = null },
                 title = {
-                    Text(if (target == UninstallTarget.DESKTOP) "Remove the desktop?" else "Remove Debian?")
+                    Text(if (target == UninstallTarget.DESKTOP) "Remove the desktop?" else "Remove ${activeContainer?.name ?: "the container"}?")
                 },
                 text = {
                     Text(
-                        if (target == UninstallTarget.DESKTOP) "XFCE and its display files go away. Your terminal files stay."
-                        else "This erases the whole Linux system and all files inside it.",
+                        if (target == UninstallTarget.DESKTOP) "${flavor.desktopLabel} and its display files go away. Your terminal files stay."
+                        else "This erases the whole Linux system and all files inside it. Other containers are not touched.",
                     )
                 },
                 confirmButton = {
                     Button(
                         onClick = {
-                            if (target == UninstallTarget.DESKTOP) onUninstallDesktop() else onUninstallDebian()
+                            if (target == UninstallTarget.DESKTOP) onRemoveDesktop() else onRemoveContainer()
                             confirmTarget = null
                         },
                     ) { Text("Remove") }
@@ -776,15 +983,33 @@ private fun SettingsPage(
                 },
             )
         }
+        deleteContainerTarget?.let { target ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { deleteContainerTarget = null },
+                title = { Text("Delete ${target.name}?") },
+                text = { Text("This erases ${target.name} and every file inside it. Other containers are not touched.") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            onDeleteContainer(target.id)
+                            deleteContainerTarget = null
+                        },
+                    ) { Text("Delete") }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { deleteContainerTarget = null }) { Text("Keep") }
+                },
+            )
+        }
         HorizontalDivider()
         SettingsCard(
             icon = Icons.Outlined.Info,
             title = "About",
             value = "Lindroid 0.1.0-alpha",
-            supporting = "PRoot is GPL-2.0. Debian is downloaded from the official Docker image registry.",
+            supporting = "PRoot is GPL-2.0. Container images are downloaded from the official Docker image registry.",
         )
         Text(
-            "This is a Linux userland, not a virtual machine. Docker, kernel modules and systemd are not supported in rootless mode.",
+            "This is a Linux userland, not a virtual machine. Docker, kernel modules and systemd are not supported in rootless mode. The Mint container runs x86_64 software through QEMU, which is slower than native ARM64.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

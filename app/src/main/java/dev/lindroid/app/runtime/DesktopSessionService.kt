@@ -60,36 +60,37 @@ class DesktopSessionService : Service() {
         if (intent?.action == ACTION_STOP) {
             stopDesktop()
         } else if (process?.isAlive != true) {
-            startDesktop()
+            startDesktop(intent?.getStringExtra(EXTRA_CONTAINER) ?: RuntimePaths.DEFAULT_ID)
         }
         return START_NOT_STICKY
     }
 
-    private fun startDesktop() {
-        val paths = RuntimePaths(this)
-        if (!paths.rootfs.resolve(DesktopSetupBus.DESKTOP_MARKER).isFile) {
-            DesktopSessionBus.update(DesktopSessionStatus.FAILED, "Install the XFCE desktop first")
+    private fun startDesktop(containerId: String) {
+        val container = ContainerRegistry.find(this, containerId)
+        if (container == null || !RuntimePaths(this, containerId).rootfs.resolve(DesktopSetupBus.DESKTOP_MARKER).isFile) {
+            DesktopSessionBus.update(DesktopSessionStatus.FAILED, "Install the desktop for this container first")
             stopSelf()
             return
         }
+        val flavor = container.flavor
 
         createChannel()
-        startForeground(NOTIFICATION_ID, notification("Starting the Debian desktop…"))
+        startForeground(NOTIFICATION_ID, notification("Starting the ${flavor.label} desktop…"))
         val password = randomPassword()
-        DesktopSessionBus.update(DesktopSessionStatus.STARTING, "Starting XFCE and its private display…", password)
+        DesktopSessionBus.update(DesktopSessionStatus.STARTING, "Starting ${flavor.desktopLabel} and its private display…", password)
 
         scope.launch {
             try {
                 val (geometry, dpi) = displayProfile()
                 val command = ProotRuntime.cleanEnvironment(
-                    command = listOf("/bin/bash", "-lc", DESKTOP_SCRIPT),
+                    command = listOf("/bin/bash", "-lc", desktopScript(flavor)),
                     extra = mapOf(
                         "LINDROID_VNC_PASSWORD" to password,
                         "LINDROID_VNC_GEOMETRY" to geometry,
                         "LINDROID_VNC_DPI" to dpi.toString(),
                     ),
                 )
-                val running = ProotRuntime.processBuilder(this@DesktopSessionService, command).start()
+                val running = ProotRuntime.processBuilder(this@DesktopSessionService, command, containerId).start()
                 process = running
                 val recentLines = java.util.Collections.synchronizedList(mutableListOf<String>())
 
@@ -114,12 +115,12 @@ class DesktopSessionService : Service() {
                     val hint = if (!running.isAlive && recentLines.isNotEmpty()) {
                         " Early output: ${recentLines.takeLast(5).joinToString(" | ").take(400)}"
                     } else {
-                        " Check /root/.vnc/Xtigervnc.log and /root/.vnc/xfce.log in the Debian terminal."
+                        " Check /root/.vnc/Xtigervnc.log and /root/.vnc/desktop.log in the terminal."
                     }
-                    error("The XFCE display did not start in time.$hint")
+                    error("The ${flavor.desktopLabel} display did not start in time.$hint")
                 }
-                DesktopSessionBus.update(DesktopSessionStatus.RUNNING, "Debian XFCE is running", password)
-                updateNotification("Debian XFCE is running")
+                DesktopSessionBus.update(DesktopSessionStatus.RUNNING, "${flavor.label} ${flavor.desktopLabel} is running", password)
+                updateNotification("${flavor.label} ${flavor.desktopLabel} is running")
 
                 val exit = running.waitFor()
                 if (DesktopSessionBus.status.value != DesktopSessionStatus.STOPPED) {
@@ -157,7 +158,8 @@ class DesktopSessionService : Service() {
         return "${width}x${height}" to dpi
     }
 
-    private suspend fun waitForVnc(process: Process): Boolean {        repeat(90) {
+    private suspend fun waitForVnc(process: Process): Boolean {
+        repeat(90) {
             if (!process.isAlive) return false
             val connected = runCatching {
                 Socket().use { socket ->
@@ -181,6 +183,31 @@ class DesktopSessionService : Service() {
         stopSelf()
     }
 
+    private fun desktopScript(flavor: DistroFlavor): String = """
+        set -e
+        mkdir -p /root/.vnc /tmp/.X11-unix /tmp/lindroid-runtime
+        chmod 700 /root/.vnc /tmp/lindroid-runtime
+        rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+        PASSWD_BIN=${'$'}(command -v tigervncpasswd || command -v vncpasswd)
+        XVNC_BIN=${'$'}(command -v Xtigervnc || command -v Xvnc)
+        test -n "${'$'}PASSWD_BIN" -a -n "${'$'}XVNC_BIN"
+        printf '%s\n' "${'$'}LINDROID_VNC_PASSWORD" | "${'$'}PASSWD_BIN" -f > /root/.vnc/passwd
+        chmod 600 /root/.vnc/passwd
+        test -s /etc/machine-id || dbus-uuidgen --ensure=/etc/machine-id
+        "${'$'}XVNC_BIN" :1 -geometry "${'$'}LINDROID_VNC_GEOMETRY" -depth 24 -dpi "${'$'}LINDROID_VNC_DPI" -localhost -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -AlwaysShared -ac > /root/.vnc/Xtigervnc.log 2>&1 &
+        VNC_PID=${'$'}!
+        export DISPLAY=:1
+        export XDG_RUNTIME_DIR=/tmp/lindroid-runtime
+        for attempt in ${'$'}(seq 1 60); do
+            test -S /tmp/.X11-unix/X1 && break
+            kill -0 "${'$'}VNC_PID" 2>/dev/null || { echo "Xtigervnc exited early; see /root/.vnc/Xtigervnc.log"; cat /root/.vnc/Xtigervnc.log; exit 1; }
+            sleep 0.25
+        done
+        test -S /tmp/.X11-unix/X1 || { echo "Xtigervnc never created its X socket; see /root/.vnc/Xtigervnc.log"; cat /root/.vnc/Xtigervnc.log; exit 1; }
+        ${flavor.desktopSessionCommand} > /root/.vnc/desktop.log 2>&1 &
+        wait "${'$'}VNC_PID"
+    """
+
     private fun randomPassword(): String {
         val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
         val random = SecureRandom()
@@ -190,7 +217,7 @@ class DesktopSessionService : Service() {
     private fun createChannel() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Linux desktop", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Keeps the local Debian graphical desktop running"
+                description = "Keeps the local graphical desktop running"
             },
         )
     }
@@ -234,33 +261,20 @@ class DesktopSessionService : Service() {
         private const val CHANNEL_ID = "lindroid_desktop"
         private const val NOTIFICATION_ID = 1203
         private const val ACTION_STOP = "dev.lindroid.app.STOP_DESKTOP"
-        private const val DESKTOP_SCRIPT = """
-            set -e
-            mkdir -p /root/.vnc /tmp/.X11-unix /tmp/lindroid-runtime
-            chmod 700 /root/.vnc /tmp/lindroid-runtime
-            rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-            PASSWD_BIN=${'$'}(command -v tigervncpasswd || command -v vncpasswd)
-            XVNC_BIN=${'$'}(command -v Xtigervnc || command -v Xvnc)
-            test -n "${'$'}PASSWD_BIN" -a -n "${'$'}XVNC_BIN"
-            printf '%s\n' "${'$'}LINDROID_VNC_PASSWORD" | "${'$'}PASSWD_BIN" -f > /root/.vnc/passwd
-            chmod 600 /root/.vnc/passwd
-            test -s /etc/machine-id || dbus-uuidgen --ensure=/etc/machine-id
-            "${'$'}XVNC_BIN" :1 -geometry "${'$'}LINDROID_VNC_GEOMETRY" -depth 24 -dpi "${'$'}LINDROID_VNC_DPI" -localhost -SecurityTypes VncAuth -PasswordFile /root/.vnc/passwd -AlwaysShared -ac > /root/.vnc/Xtigervnc.log 2>&1 &
-            VNC_PID=${'$'}!
-            export DISPLAY=:1
-            export XDG_RUNTIME_DIR=/tmp/lindroid-runtime
-            for attempt in ${'$'}(seq 1 60); do
-                test -S /tmp/.X11-unix/X1 && break
-                kill -0 "${'$'}VNC_PID" 2>/dev/null || { echo "Xtigervnc exited early; see /root/.vnc/Xtigervnc.log"; cat /root/.vnc/Xtigervnc.log; exit 1; }
-                sleep 0.25
-            done
-            test -S /tmp/.X11-unix/X1 || { echo "Xtigervnc never created its X socket; see /root/.vnc/Xtigervnc.log"; cat /root/.vnc/Xtigervnc.log; exit 1; }
-            dbus-launch --exit-with-session startxfce4 > /root/.vnc/xfce.log 2>&1 &
-            wait "${'$'}VNC_PID"
-        """
+        private const val EXTRA_CONTAINER = "container"
 
-        fun start(context: Context) {
-            context.startForegroundService(Intent(context, DesktopSessionService::class.java))
+        fun start(context: Context, containerId: String) {
+            context.startForegroundService(
+                Intent(context, DesktopSessionService::class.java).putExtra(EXTRA_CONTAINER, containerId),
+            )
+        }
+
+        /**
+         * Reattach path: opens the desktop for whatever container is active,
+         * used when the activity is restored without an explicit start.
+         */
+        fun startActive(context: Context) {
+            start(context, ContainerRegistry.load(context).activeId)
         }
 
         fun stop(context: Context) {

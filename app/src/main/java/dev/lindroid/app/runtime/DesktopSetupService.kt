@@ -37,13 +37,11 @@ object DesktopSetupBus {
     val log = mutableLog.asStateFlow()
     val error = mutableError.asStateFlow()
 
-    fun refresh(context: Context) {
+    fun refresh(context: Context, containerId: String?) {
         if (mutableStatus.value == DesktopSetupStatus.INSTALLING) return
-        mutableStatus.value = if (RuntimePaths(context).rootfs.resolve(DESKTOP_MARKER).isFile) {
-            DesktopSetupStatus.INSTALLED
-        } else {
-            DesktopSetupStatus.NOT_INSTALLED
-        }
+        val installed = containerId != null &&
+            RuntimePaths(context, containerId).rootfs.resolve(DESKTOP_MARKER).isFile
+        mutableStatus.value = if (installed) DesktopSetupStatus.INSTALLED else DesktopSetupStatus.NOT_INSTALLED
     }
 
     internal fun status(value: DesktopSetupStatus, error: String? = null) {
@@ -67,29 +65,33 @@ class DesktopSetupService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (process?.isAlive != true) installDesktop()
+        if (process?.isAlive != true) installDesktop(intent?.getStringExtra(EXTRA_CONTAINER) ?: RuntimePaths.DEFAULT_ID)
         return START_NOT_STICKY
     }
 
-    private fun installDesktop() {
+    private fun installDesktop(containerId: String) {
+        val container = ContainerRegistry.find(this, containerId) ?: return
+        val flavor = container.flavor
         createChannel()
-        startForeground(NOTIFICATION_ID, notification("Installing the Debian desktop…"))
+        startForeground(NOTIFICATION_ID, notification("Installing the ${flavor.label} desktop…"))
         DesktopSetupBus.status(DesktopSetupStatus.INSTALLING)
-        DesktopSetupBus.append("Preparing the XFCE desktop. This is a one-time download.\n")
+        DesktopSetupBus.append("Preparing the ${flavor.desktopLabel} desktop. This is a one-time download.\n")
 
         scope.launch {
             try {
-                ensureFreeSpace()
+                ensureFreeSpace(flavor)
                 val command = ProotRuntime.cleanEnvironment(
-                    listOf("/bin/bash", "-lc", SETUP_SCRIPT),
+                    listOf("/bin/bash", "-lc", setupScript(flavor)),
                 )
-                val running = ProotRuntime.processBuilder(this@DesktopSetupService, command).start()
+                val running = ProotRuntime.processBuilder(this@DesktopSetupService, command, containerId).start()
                 process = running
                 running.inputStream.reader().useLines { lines ->
                     lines.forEach { DesktopSetupBus.append("$it\n") }
                 }
                 val exit = running.waitFor()
-                if (exit == 0 && RuntimePaths(this@DesktopSetupService).rootfs.resolve(DesktopSetupBus.DESKTOP_MARKER).isFile) {
+                val installed = exit == 0 &&
+                    RuntimePaths(this@DesktopSetupService, containerId).rootfs.resolve(DesktopSetupBus.DESKTOP_MARKER).isFile
+                if (installed) {
                     DesktopSetupBus.append("Desktop installation complete.\n")
                     DesktopSetupBus.status(DesktopSetupStatus.INSTALLED)
                 } else {
@@ -108,21 +110,27 @@ class DesktopSetupService : Service() {
     }
 
     /**
-     * The XFCE download needs roughly 1.2 GB free: APT archives plus the
-     * unpacked packages inside the rootfs.
+     * The desktop packages download and unpack inside the rootfs. Cinnamon on
+     * the Mint flavor needs a larger budget than XFCE.
      */
-    private fun ensureFreeSpace() {
+    private fun ensureFreeSpace(flavor: DistroFlavor) {
         val available = StatFs(RuntimePaths(this).rootfs.path).availableBytes
-        check(available >= 1_200_000_000L) {
-            val gigabytes = available / (1024f * 1024f * 1024f)
-            "Not enough free space: the desktop needs about 1.2 GB and only %.1f GB is free".format(gigabytes)
+        check(available >= flavor.minimumDesktopBytes) {
+            val needed = flavor.minimumDesktopBytes / (1024f * 1024f * 1024f)
+            val free = available / (1024f * 1024f * 1024f)
+            "Not enough free space: the desktop needs about %.1f GB and only %.1f GB is free".format(needed, free)
         }
+    }
+
+    private fun setupScript(flavor: DistroFlavor): String = when (flavor) {
+        DistroFlavor.DEBIAN -> DEBIAN_SETUP_SCRIPT
+        DistroFlavor.MINT -> MINT_SETUP_SCRIPT
     }
 
     private fun createChannel() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Desktop setup", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Downloads and configures XFCE inside Debian"
+                description = "Downloads and configures desktop packages inside a container"
             },
         )
     }
@@ -152,7 +160,9 @@ class DesktopSetupService : Service() {
     companion object {
         private const val CHANNEL_ID = "lindroid_desktop_setup"
         private const val NOTIFICATION_ID = 1202
-        private const val SETUP_SCRIPT = """
+        private const val EXTRA_CONTAINER = "container"
+
+        private val DEBIAN_SETUP_SCRIPT = """
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
@@ -161,10 +171,29 @@ class DesktopSetupService : Service() {
             rm -rf /var/lib/apt/lists/*
             mkdir -p /root/.config/xfce4 /root/Desktop
             touch /root/.lindroid-desktop
-        """
+        """.trimIndent()
 
-        fun start(context: Context) {
-            context.startForegroundService(Intent(context, DesktopSetupService::class.java))
+        private val MINT_SETUP_SCRIPT = """
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            if test -f /etc/apt/sources.list.d/ubuntu.sources; then
+              sed -i 's/^Components:.*/Components: main universe restricted multiverse/' /etc/apt/sources.list.d/ubuntu.sources
+            fi
+            printf '%s\n' 'deb [trusted=yes] http://packages.linuxmint.com wilma main upstream import backport' > /etc/apt/sources.list.d/mint.list
+            apt-get update
+            apt-get install -y linuxmint-keyring || true
+            apt-get update
+            apt-get install -y mint-meta-cinnamon dbus-x11 tigervnc-standalone-server tigervnc-tools xfonts-base fonts-dejavu-core adwaita-icon-theme
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+            mkdir -p /root/.config /root/Desktop
+            touch /root/.lindroid-desktop
+        """.trimIndent()
+
+        fun start(context: Context, containerId: String) {
+            context.startForegroundService(
+                Intent(context, DesktopSetupService::class.java).putExtra(EXTRA_CONTAINER, containerId),
+            )
         }
     }
 }

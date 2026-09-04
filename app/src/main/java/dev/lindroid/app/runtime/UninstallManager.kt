@@ -45,12 +45,15 @@ object UninstallBus {
 
 object UninstallManager {
     internal const val EXTRA_TARGET = "target"
+    internal const val EXTRA_CONTAINER = "container"
 
-    fun uninstall(context: Context, target: UninstallTarget) {
+    fun uninstall(context: Context, target: UninstallTarget, containerId: String = RuntimePaths.DEFAULT_ID) {
         if (UninstallBus.running.value) return
         UninstallBus.setRunning(true)
         context.startForegroundService(
-            Intent(context, UninstallService::class.java).putExtra(EXTRA_TARGET, target.name),
+            Intent(context, UninstallService::class.java)
+                .putExtra(EXTRA_TARGET, target.name)
+                .putExtra(EXTRA_CONTAINER, containerId),
         )
     }
 }
@@ -69,20 +72,21 @@ class UninstallService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        val containerId = intent.getStringExtra(UninstallManager.EXTRA_CONTAINER) ?: RuntimePaths.DEFAULT_ID
 
         createChannel()
         startForeground(
             NOTIFICATION_ID,
             notification(
-                if (target == UninstallTarget.DEBIAN) "Removing Debian and its files…" else "Removing the graphical desktop…",
+                if (target == UninstallTarget.DEBIAN) "Removing the container and its files…" else "Removing the desktop…",
             ),
         )
 
         scope.launch {
             try {
                 when (target) {
-                    UninstallTarget.DEBIAN -> removeDebian()
-                    UninstallTarget.DESKTOP -> removeDesktop()
+                    UninstallTarget.DEBIAN -> removeContainer(containerId)
+                    UninstallTarget.DESKTOP -> removeDesktop(containerId)
                 }
                 UninstallBus.setRunning(false, "Removal complete")
                 UninstallBus.notifyCompleted()
@@ -98,25 +102,27 @@ class UninstallService : Service() {
         return START_NOT_STICKY
     }
 
-    private suspend fun removeDebian() {
+    private suspend fun removeContainer(containerId: String) {
         LinuxSessionService.stop(this)
         DesktopSessionService.stop(this)
         // Give the foreground services a moment to tear their PRoot processes down.
         delay(800)
-        val paths = RuntimePaths(this)
+        val paths = RuntimePaths(this, containerId)
         paths.rootfs.deleteRecursively()
         paths.installStage.deleteRecursively()
-        check(!paths.rootfs.exists()) { "Could not fully delete the Debian files" }
+        check(!paths.rootfs.exists()) { "Could not fully delete the container files" }
+        ContainerRegistry.remove(this, containerId)
     }
 
-    private suspend fun removeDesktop() {
-        val paths = RuntimePaths(this)
-        check(paths.marker.isFile) { "Debian is not installed" }
+    private suspend fun removeDesktop(containerId: String) {
+        val paths = RuntimePaths(this, containerId)
+        check(paths.marker.isFile) { "This container is not installed" }
+        val container = ContainerRegistry.find(this, containerId) ?: return
         DesktopSessionService.stop(this)
         val command = ProotRuntime.cleanEnvironment(
-            command = listOf("/bin/bash", "-lc", DESKTOP_REMOVE_SCRIPT),
+            command = listOf("/bin/bash", "-lc", desktopRemoveScript(container.flavor)),
         )
-        val running = ProotRuntime.processBuilder(this, command).start()
+        val running = ProotRuntime.processBuilder(this, command, containerId).start()
         process = running
         running.inputStream.reader().useLines { lines ->
             lines.forEach { line ->
@@ -130,10 +136,33 @@ class UninstallService : Service() {
         }
     }
 
+    private fun desktopRemoveScript(flavor: DistroFlavor): String = when (flavor) {
+        DistroFlavor.DEBIAN -> """
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get purge -y --auto-remove xfce4 xfce4-terminal dbus-x11 tigervnc-standalone-server tigervnc-tools xfonts-base fonts-dejavu-core adwaita-icon-theme
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+            rm -rf /root/.vnc
+            rm -f /root/.lindroid-desktop
+        """.trimIndent()
+
+        DistroFlavor.MINT -> """
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get purge -y mint-meta-cinnamon
+            apt-get autoremove -y --purge
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+            rm -rf /root/.vnc /etc/apt/sources.list.d/mint.list
+            rm -f /root/.lindroid-desktop
+        """.trimIndent()
+    }
+
     private fun createChannel() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Linux removal", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Removes the Debian desktop or the whole Debian system"
+                description = "Removes a container's desktop or the whole container"
             },
         )
     }
@@ -163,14 +192,5 @@ class UninstallService : Service() {
     companion object {
         private const val CHANNEL_ID = "lindroid_uninstall"
         private const val NOTIFICATION_ID = 1204
-        private const val DESKTOP_REMOVE_SCRIPT = """
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get purge -y --auto-remove xfce4 xfce4-terminal dbus-x11 tigervnc-standalone-server tigervnc-tools xfonts-base fonts-dejavu-core adwaita-icon-theme
-            apt-get clean
-            rm -rf /var/lib/apt/lists/*
-            rm -rf /root/.vnc
-            rm -f /root/.lindroid-desktop
-        """
     }
 }

@@ -70,7 +70,7 @@ class DesktopActivity : ComponentActivity() {
             hide(WindowInsetsCompat.Type.systemBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
-        DesktopSessionService.start(this)
+        DesktopSessionService.startActive(this)
 
         setContent {
             LindroidTheme {

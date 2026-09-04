@@ -4,18 +4,31 @@ import android.content.Context
 import java.io.File
 
 internal object ProotRuntime {
-    fun processBuilder(context: Context, guestCommand: List<String>): ProcessBuilder {
-        val paths = RuntimePaths(context)
+    fun processBuilder(
+        context: Context,
+        guestCommand: List<String>,
+        containerId: String = RuntimePaths.DEFAULT_ID,
+    ): ProcessBuilder {
+        val paths = RuntimePaths(context, containerId)
         val nativeDir = context.applicationInfo.nativeLibraryDir
         val proot = File(nativeDir, "libproot.so")
         val loader = File(nativeDir, "libproot_loader.so")
         check(proot.isFile && loader.isFile) { "The ARM64 PRoot runtime is missing" }
-        check(paths.marker.isFile) { "Debian is not installed" }
+        check(paths.marker.isFile) { "This container is not installed yet" }
         paths.prepareHostDirectories()
 
+        val flavor = ContainerRegistry.find(context, containerId)?.flavor ?: DistroFlavor.DEBIAN
         val command = buildList {
             add(proot.absolutePath)
             add("--link2symlink")
+            if (flavor.needsEmulation) {
+                // Guest binaries are x86_64: hand every exec to the bundled
+                // user-mode emulator. QEMU's own opens flow through PRoot's
+                // path bindings, so it loads the guest's libraries and loader
+                // from inside the container.
+                add("-q")
+                add(File(nativeDir, "libqemu-x86-64.so").absolutePath)
+            }
             add("-0")
             add("-r")
             add(paths.rootfs.absolutePath)

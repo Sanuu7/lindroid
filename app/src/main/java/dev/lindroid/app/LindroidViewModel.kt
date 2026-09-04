@@ -6,16 +6,21 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import dev.lindroid.app.runtime.DebianInstaller
+import dev.lindroid.app.runtime.ContainerRegistry
+import dev.lindroid.app.runtime.DistroFlavor
 import dev.lindroid.app.runtime.DesktopSessionBus
 import dev.lindroid.app.runtime.DesktopSessionService
 import dev.lindroid.app.runtime.DesktopSetupBus
 import dev.lindroid.app.runtime.DesktopSetupService
 import dev.lindroid.app.runtime.InstallState
 import dev.lindroid.app.runtime.LinuxSessionService
+import dev.lindroid.app.runtime.LxContainer
+import dev.lindroid.app.runtime.RootfsInstaller
 import dev.lindroid.app.runtime.RuntimePaths
 import dev.lindroid.app.runtime.SessionBus
 import dev.lindroid.app.runtime.UninstallBus
+import dev.lindroid.app.runtime.UninstallManager
+import dev.lindroid.app.runtime.UninstallTarget
 import dev.lindroid.app.shizuku.ShizukuState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,18 +28,25 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 
 data class SharedEntry(val name: String, val isDirectory: Boolean, val size: Long, val lastModified: Long)
 
 class LindroidViewModel(application: Application) : AndroidViewModel(application) {
+    private val app = application
     private val paths = RuntimePaths(application)
-    private val mutableInstallState = MutableStateFlow<InstallState>(
-        if (paths.marker.isFile) InstallState.Installed else InstallState.NotInstalled,
-    )
+
+    private val mutableContainers = MutableStateFlow<List<LxContainer>>(emptyList())
+    private val mutableActiveContainer = MutableStateFlow<LxContainer?>(null)
+    private val mutableContainerStates = MutableStateFlow<Map<String, InstallState>>(emptyMap())
+    private val mutableInstallState = MutableStateFlow<InstallState>(InstallState.NotInstalled)
     private val mutableSharedEntries = MutableStateFlow<List<SharedEntry>>(emptyList())
     private val mutableSharedPath = MutableStateFlow("")
     private val mutableSharedNotice = MutableStateFlow<String?>(null)
 
+    val containers = mutableContainers.asStateFlow()
+    val activeContainer = mutableActiveContainer.asStateFlow()
+    val containerStates = mutableContainerStates.asStateFlow()
     val installState = mutableInstallState.asStateFlow()
     val terminalOutput = SessionBus.output
     val sessionStatus = SessionBus.status
@@ -49,39 +61,88 @@ class LindroidViewModel(application: Application) : AndroidViewModel(application
     val sharedNotice = mutableSharedNotice.asStateFlow()
 
     init {
-        DesktopSetupBus.refresh(application)
         viewModelScope.launch {
             UninstallBus.completed.collect {
-                mutableInstallState.value = if (paths.marker.isFile) InstallState.Installed else InstallState.NotInstalled
-                DesktopSetupBus.refresh(application)
+                refreshContainers()
+                DesktopSetupBus.refresh(app, mutableActiveContainer.value?.id)
             }
         }
+        refreshContainers()
         refreshSharedFiles()
     }
 
-    fun installDebian() {
+    fun refreshContainers() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val snapshot = ContainerRegistry.load(app)
+            val states = snapshot.containers.associate { container ->
+                container.id to if (RuntimePaths(app, container.id).marker.isFile) {
+                    InstallState.Installed
+                } else {
+                    InstallState.NotInstalled
+                }
+            }
+            mutableContainerStates.value = states
+            val active = snapshot.containers.firstOrNull { it.id == snapshot.activeId }
+                ?: snapshot.containers.firstOrNull()
+            mutableContainers.value = snapshot.containers
+            mutableActiveContainer.value = active
+            DesktopSetupBus.refresh(app, active?.id)
+            if (mutableInstallState.value !is InstallState.Installing) {
+                mutableInstallState.value = active?.let { states[it.id] } ?: InstallState.NotInstalled
+            }
+        }
+    }
+
+    fun selectContainer(id: String) {
+        if (mutableActiveContainer.value?.id == id) return
+        viewModelScope.launch(Dispatchers.IO) {
+            // Only one container drives the shared display port and terminal
+            // session at a time, so stop whatever the previous one left running.
+            LinuxSessionService.stop(app)
+            DesktopSessionService.stop(app)
+            ContainerRegistry.setActive(app, id)
+            refreshContainers()
+        }
+    }
+
+    fun createContainer(name: String, flavor: DistroFlavor) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val clean = name.trim().ifBlank { flavor.label }
+            val id = ContainerRegistry.uniqueId(app, slug(clean))
+            ContainerRegistry.add(app, LxContainer(id, flavor, clean))
+            refreshContainers()
+        }
+    }
+
+    fun deleteContainer(id: String) = UninstallManager.uninstall(app, UninstallTarget.DEBIAN, id)
+
+    fun installRootfs() {
+        val container = mutableActiveContainer.value ?: return
         if (mutableInstallState.value is InstallState.Installing) return
         viewModelScope.launch {
             mutableInstallState.value = InstallState.Installing(null, "Preparing installation…")
             runCatching {
                 withContext(Dispatchers.IO) {
-                    DebianInstaller(getApplication()).install { fraction, message ->
+                    RootfsInstaller(app, container).install { fraction, message ->
                         mutableInstallState.value = InstallState.Installing(fraction, message)
                     }
                 }
             }.onSuccess {
                 mutableInstallState.value = InstallState.Installed
+                refreshContainers()
             }.onFailure {
                 mutableInstallState.value = InstallState.Failed(it.message ?: "Installation failed")
             }
         }
     }
 
-    fun retryInstall() = installDebian()
+    fun retryInstall() = installRootfs()
 
-    fun startSession() = LinuxSessionService.start(getApplication())
+    fun startSession() {
+        mutableActiveContainer.value?.let { LinuxSessionService.start(app, it.id) }
+    }
 
-    fun stopSession() = LinuxSessionService.stop(getApplication())
+    fun stopSession() = LinuxSessionService.stop(app)
 
     fun sendCommand(command: String) {
         if (command.isNotBlank()) LinuxSessionService.send(command.trimEnd())
@@ -91,11 +152,23 @@ class LindroidViewModel(application: Application) : AndroidViewModel(application
 
     fun requestShizuku() = ShizukuState.requestPermission()
 
-    fun installDesktop() = DesktopSetupService.start(getApplication())
+    fun installDesktop() {
+        mutableActiveContainer.value?.let { DesktopSetupService.start(app, it.id) }
+    }
 
-    fun startDesktop() = DesktopSessionService.start(getApplication())
+    fun startDesktop() {
+        mutableActiveContainer.value?.let { DesktopSessionService.start(app, it.id) }
+    }
 
-    fun stopDesktop() = DesktopSessionService.stop(getApplication())
+    fun stopDesktop() = DesktopSessionService.stop(app)
+
+    fun removeDesktop() {
+        mutableActiveContainer.value?.let { UninstallManager.uninstall(app, UninstallTarget.DESKTOP, it.id) }
+    }
+
+    fun removeActiveContainer() {
+        mutableActiveContainer.value?.let { UninstallManager.uninstall(app, UninstallTarget.DEBIAN, it.id) }
+    }
 
     fun refreshSharedFiles() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -122,7 +195,7 @@ class LindroidViewModel(application: Application) : AndroidViewModel(application
 
     fun importSharedFiles(uris: List<Uri>) {
         viewModelScope.launch(Dispatchers.IO) {
-            val resolver = getApplication<Application>().contentResolver
+            val resolver = app.contentResolver
             val target = sharedDirectory()
             var imported = 0
             var failed = 0
@@ -150,7 +223,7 @@ class LindroidViewModel(application: Application) : AndroidViewModel(application
     fun exportSharedFile(entry: SharedEntry, target: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
-                val resolver = getApplication<Application>().contentResolver
+                val resolver = app.contentResolver
                 File(sharedDirectory(), entry.name).inputStream().use { input ->
                     resolver.openOutputStream(target)?.use { output ->
                         input.copyTo(output)
@@ -203,4 +276,9 @@ class LindroidViewModel(application: Application) : AndroidViewModel(application
         }
         return candidate
     }
+
+    private fun slug(name: String): String =
+        name.lowercase(Locale.ROOT).map { char ->
+            if (char.isLetterOrDigit()) char else '-'
+        }.joinToString("").trim('-').ifBlank { "container" }
 }

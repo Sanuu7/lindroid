@@ -64,6 +64,7 @@ class LinuxSessionService : Service() {
     private var process: Process? = null
     private var writer: BufferedWriter? = null
     private var readerJob: Job? = null
+    private var containerId: String = RuntimePaths.DEFAULT_ID
 
     inner class LocalBinder : Binder()
 
@@ -72,23 +73,26 @@ class LinuxSessionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> stopSession()
-            else -> if (process?.isAlive != true) startSession()
+            else -> if (process?.isAlive != true) {
+                containerId = intent?.getStringExtra(EXTRA_CONTAINER) ?: RuntimePaths.DEFAULT_ID
+                startSession()
+            }
         }
         return START_NOT_STICKY
     }
 
     private fun startSession() {
-        val paths = RuntimePaths(this)
+        val paths = RuntimePaths(this, containerId)
         if (!paths.marker.isFile) {
-            SessionBus.setStatus(SessionStatus.FAILED, "Debian is not installed")
+            SessionBus.setStatus(SessionStatus.FAILED, "This container is not installed")
             stopSelf()
             return
         }
 
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, notification("Starting Debian…"))
+        startForeground(NOTIFICATION_ID, notification("Starting the Linux session…"))
         SessionBus.setStatus(SessionStatus.STARTING)
-        SessionBus.append("\nStarting Debian 12 on Android’s Linux kernel…\n")
+        SessionBus.append("\nStarting the Linux session on Android's kernel…\n")
 
         scope.launch {
             try {
@@ -98,6 +102,7 @@ class LinuxSessionService : Service() {
                     ProotRuntime.cleanEnvironment(
                         listOf("/bin/bash", "--noprofile", "--rcfile", "/root/.bashrc", "-i"),
                     ),
+                    containerId,
                 ).start()
 
                 process = started
@@ -122,7 +127,7 @@ class LinuxSessionService : Service() {
                 SessionBus.setStatus(SessionStatus.STOPPED)
             } catch (error: Throwable) {
                 val message = error.message ?: error.javaClass.simpleName
-                SessionBus.append("\n[Could not start Debian: $message]\n")
+                SessionBus.append("\n[Could not start the Linux session: $message]\n")
                 SessionBus.setStatus(SessionStatus.FAILED, message)
             } finally {
                 writer = null
@@ -211,9 +216,12 @@ class LinuxSessionService : Service() {
         private const val CHANNEL_ID = "lindroid_session"
         private const val NOTIFICATION_ID = 1201
         private const val ACTION_STOP = "dev.lindroid.app.STOP_SESSION"
+        private const val EXTRA_CONTAINER = "container"
 
-        fun start(context: Context) {
-            context.startForegroundService(Intent(context, LinuxSessionService::class.java))
+        fun start(context: Context, containerId: String = RuntimePaths.DEFAULT_ID) {
+            context.startForegroundService(
+                Intent(context, LinuxSessionService::class.java).putExtra(EXTRA_CONTAINER, containerId),
+            )
         }
 
         fun stop(context: Context) {

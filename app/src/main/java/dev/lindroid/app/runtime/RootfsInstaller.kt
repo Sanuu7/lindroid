@@ -19,9 +19,15 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
-class DebianInstaller(context: Context) {
+/**
+ * Pulls a container's OCI image from Docker Hub, verifies every layer digest,
+ * and unpacks it into the container's rootfs. Works for any [DistroFlavor]:
+ * the flavor only decides which repository and architecture to pull.
+ */
+class RootfsInstaller(context: Context, private val container: LxContainer) {
+    private val flavor = container.flavor
     private val appContext = context.applicationContext
-    private val paths = RuntimePaths(context)
+    private val paths = RuntimePaths(context, container.id)
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(2, TimeUnit.MINUTES)
@@ -34,9 +40,9 @@ class DebianInstaller(context: Context) {
         check(paths.installStage.mkdirs()) { "Could not create the installation directory" }
 
         try {
-            report(null, "Contacting the Debian registry…")
+            report(null, "Contacting the image registry…")
             val token = registryToken()
-            val manifest = resolveArm64Manifest(token)
+            val manifest = resolveManifest(token)
             val layers = manifest.getJSONArray("layers")
             ensureFreeSpace(layers)
 
@@ -45,24 +51,24 @@ class DebianInstaller(context: Context) {
                 val digest = layer.getString("digest")
                 val expectedSize = layer.optLong("size", -1L)
                 val layerNumber = index + 1
-                report(index.toFloat() / layers.length(), "Fetching Debian layer $layerNumber of ${layers.length()}")
+                report(index.toFloat() / layers.length(), "Fetching ${flavor.label} layer $layerNumber of ${layers.length()}")
                 val archive = downloadLayer(token, digest, expectedSize) { bytes, total ->
                     val withinLayer = if (total > 0) bytes.toFloat() / total else 0f
                     report(
                         (index + withinLayer) / layers.length(),
-                        "Fetching Debian • ${formatBytes(bytes)}",
+                        "Fetching ${flavor.label} • ${formatBytes(bytes)}",
                     )
                 }
-                report((index + 0.92f) / layers.length(), "Unpacking Debian layer $layerNumber")
+                report((index + 0.92f) / layers.length(), "Unpacking ${flavor.label} layer $layerNumber")
                 extractLayer(archive, paths.installStage)
             }
 
             configureRootfs(paths.installStage)
             paths.rootfs.parentFile?.mkdirs()
             paths.rootfs.deleteRecursively()
-            check(paths.installStage.renameTo(paths.rootfs)) { "Could not activate the Debian installation" }
-            paths.marker.writeText("debian:12-slim\n")
-            report(1f, "Debian is ready")
+            check(paths.installStage.renameTo(paths.rootfs)) { "Could not activate the installation" }
+            paths.marker.writeText("${flavor.registryRepository}:${flavor.registryTag}\n")
+            report(1f, "${flavor.label} is ready")
         } catch (error: Throwable) {
             paths.installStage.deleteRecursively()
             throw error
@@ -72,14 +78,14 @@ class DebianInstaller(context: Context) {
     private fun registryToken(): String {
         val url = "https://auth.docker.io/token".toHttpUrl().newBuilder()
             .addQueryParameter("service", "registry.docker.io")
-            .addQueryParameter("scope", "repository:library/debian:pull")
+            .addQueryParameter("scope", "repository:${flavor.registryRepository}:pull")
             .build()
         val json = getJson(Request.Builder().url(url).header("User-Agent", USER_AGENT).build())
         return json.optString("token").ifBlank { json.getString("access_token") }
     }
 
-    private fun resolveArm64Manifest(token: String): JSONObject {
-        val initial = registryRequest("manifests/12-slim", token, MANIFEST_ACCEPT)
+    private fun resolveManifest(token: String): JSONObject {
+        val initial = registryRequest("manifests/${flavor.registryTag}", token, MANIFEST_ACCEPT)
         val body = getJson(initial)
         if (!body.has("manifests")) return body
 
@@ -88,12 +94,12 @@ class DebianInstaller(context: Context) {
         for (index in 0 until manifests.length()) {
             val candidate = manifests.getJSONObject(index)
             val platform = candidate.optJSONObject("platform") ?: continue
-            if (platform.optString("os") == "linux" && platform.optString("architecture") == "arm64") {
+            if (platform.optString("os") == "linux" && platform.optString("architecture") == flavor.architecture) {
                 digest = candidate.getString("digest")
                 break
             }
         }
-        checkNotNull(digest) { "The Debian image does not contain an ARM64 build" }
+        checkNotNull(digest) { "The ${flavor.label} image does not contain a ${flavor.architecture} build" }
         return getJson(registryRequest("manifests/$digest", token, MANIFEST_ACCEPT))
     }
 
@@ -130,10 +136,10 @@ class DebianInstaller(context: Context) {
                 }
             }
             val actual = hash.digest().joinToString("") { "%02x".format(it) }
-            check(digest == "sha256:$actual") { "Debian layer checksum verification failed" }
+            check(digest == "sha256:$actual") { "Layer checksum verification failed" }
         }
         output.delete()
-        check(partial.renameTo(output)) { "Could not store the Debian layer" }
+        check(partial.renameTo(output)) { "Could not store the downloaded layer" }
         return output
     }
 
@@ -152,7 +158,7 @@ class DebianInstaller(context: Context) {
 
     /**
      * Layers stay in the cache after a successful install so removing and
-     * reinstalling Debian does not have to redownload the image.
+     * reinstalling a container does not have to redownload the image.
      */
     private fun ensureFreeSpace(layers: JSONArray) {
         val layerBytes = (0 until layers.length()).sumOf { layers.getJSONObject(it).optLong("size", 0L) }
@@ -160,7 +166,7 @@ class DebianInstaller(context: Context) {
         // Downloaded archive plus the unpacked filesystem, with headroom.
         val required = layerBytes * 4 + 256L * 1024L * 1024L
         check(available >= required) {
-            "Not enough free space: Debian needs about ${formatBytes(required)} and only ${formatBytes(available)} is free"
+            "Not enough free space: ${flavor.label} needs about ${formatBytes(required)} and only ${formatBytes(available)} is free"
         }
     }
 
@@ -230,7 +236,7 @@ class DebianInstaller(context: Context) {
     }
 
     private fun registryRequest(path: String, token: String, accept: String) = Request.Builder()
-        .url("https://registry-1.docker.io/v2/library/debian/$path")
+        .url("https://registry-1.docker.io/v2/${flavor.registryRepository}/$path")
         .header("Authorization", "Bearer $token")
         .header("Accept", accept)
         .header("User-Agent", USER_AGENT)
