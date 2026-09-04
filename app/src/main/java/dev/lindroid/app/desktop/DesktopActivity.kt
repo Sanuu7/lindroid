@@ -1,12 +1,10 @@
 package dev.lindroid.app.desktop
 
-import android.annotation.SuppressLint
+import android.content.Context
 import android.os.Bundle
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.webkit.WebChromeClient
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -20,10 +18,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
@@ -39,11 +37,14 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
@@ -54,8 +55,9 @@ import dev.lindroid.app.runtime.DesktopSessionBus
 import dev.lindroid.app.runtime.DesktopSessionService
 import dev.lindroid.app.runtime.DesktopSessionStatus
 import dev.lindroid.app.ui.LindroidTheme
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class DesktopActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -89,14 +91,14 @@ private fun DesktopScreen(onClose: () -> Unit, onStop: () -> Unit) {
     val status by DesktopSessionBus.status.collectAsStateWithLifecycle()
     val password by DesktopSessionBus.password.collectAsStateWithLifecycle()
     val message by DesktopSessionBus.message.collectAsStateWithLifecycle()
-    var reloadKey by remember { mutableIntStateOf(0) }
+    var reconnectKey by remember { mutableIntStateOf(0) }
 
     BackHandler(onBack = onClose)
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         when (status) {
             DesktopSessionStatus.RUNNING -> password?.let {
-                DesktopWebView(it, reloadKey)
+                NativeDesktop(password = it, reconnectKey = reconnectKey)
             }
             DesktopSessionStatus.FAILED -> DesktopStatus(
                 title = "Desktop could not start",
@@ -121,7 +123,7 @@ private fun DesktopScreen(onClose: () -> Unit, onStop: () -> Unit) {
         ) {
             Row(Modifier.padding(6.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (status == DesktopSessionStatus.RUNNING) {
-                    FilledTonalIconButton(onClick = { reloadKey++ }) {
+                    FilledTonalIconButton(onClick = { reconnectKey++ }) {
                         Icon(Icons.Default.Refresh, "Reconnect display")
                     }
                 }
@@ -166,47 +168,104 @@ private fun DesktopStatus(
     }
 }
 
-@SuppressLint("SetJavaScriptEnabled")
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun DesktopWebView(password: String, reloadKey: Int) {
-    val encoded = URLEncoder.encode(password, StandardCharsets.UTF_8.name())
-    val url = "http://127.0.0.1:${LocalDesktopServer.HTTP_PORT}/vnc.html" +
-        "?autoconnect=true&reconnect=true&resize=scale&host=127.0.0.1" +
-        "&port=${LocalDesktopServer.HTTP_PORT}&encrypt=false&path=websockify" +
-        "&password=$encoded&show_dot=true&keep_device_awake=true"
-    var webView: WebView? by remember { androidx.compose.runtime.mutableStateOf(null) }
+private fun NativeDesktop(password: String, reconnectKey: Int) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var viewRef by remember { mutableStateOf<NativeDesktopView?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var connecting by remember { mutableStateOf(true) }
 
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = { context ->
-            WebView(context).apply {
-                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                setBackgroundColor(android.graphics.Color.BLACK)
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.allowFileAccess = false
-                settings.allowContentAccess = false
-                settings.mediaPlaybackRequiresUserGesture = false
-                webViewClient = WebViewClient()
-                webChromeClient = WebChromeClient()
-                loadUrl(url)
-                webView = this
+    fun connect(view: NativeDesktopView) {
+        error = null
+        connecting = true
+        scope.launch(Dispatchers.IO) {
+            val client = RfbClient(password = password)
+            try {
+                client.connect()
+                withContext(Dispatchers.Main) {
+                    view.attach(client)
+                    viewRef = view
+                    connecting = false
+                }
+            } catch (e: Exception) {
+                client.close()
+                withContext(Dispatchers.Main) {
+                    error = e.message ?: "Could not connect to the display"
+                    connecting = false
+                }
             }
-        },
-        update = { view ->
-            if (reloadKey > 0) view.loadUrl(url)
-        },
-    )
-
-    LaunchedEffect(reloadKey) {
-        if (reloadKey > 0) webView?.loadUrl(url)
+        }
     }
-    DisposableEffect(Unit) {
+
+    DisposableEffect(password, reconnectKey) {
+        val old = viewRef
         onDispose {
-            webView?.apply {
-                stopLoading()
-                loadUrl("about:blank")
-                destroy()
+            old?.client?.close()
+        }
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                NativeDesktopView(ctx).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                    connect(this)
+                }
+            },
+            update = { view ->
+                if (reconnectKey > 0) {
+                    view.client?.close()
+                    connect(view)
+                }
+            },
+        )
+
+        if (connecting) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.7f)), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    LoadingIndicator(Modifier.size(48.dp))
+                    Spacer(Modifier.size(12.dp))
+                    Text("Connecting to display", color = Color.White)
+                }
+            }
+        }
+
+        error?.let {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.85f)), contentAlignment = Alignment.Center) {
+                Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Display connection dropped", style = MaterialTheme.typography.headlineSmall, color = Color.White)
+                    Spacer(Modifier.size(8.dp))
+                    Text(it, color = Color.White.copy(alpha = 0.7f))
+                }
+            }
+        }
+
+        FilledTonalIconButton(
+            onClick = {
+                viewRef?.let { view ->
+                    view.requestFocus()
+                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.showSoftInput(view, 0)
+                }
+            },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+        ) {
+            Icon(Icons.Default.Keyboard, "Show keyboard")
+        }
+    }
+
+    LaunchedEffect(reconnectKey) {
+        if (reconnectKey > 0) {
+            viewRef?.let { view ->
+                view.client?.close()
+                connect(view)
             }
         }
     }

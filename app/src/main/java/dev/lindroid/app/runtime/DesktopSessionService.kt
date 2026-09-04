@@ -10,7 +10,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import dev.lindroid.app.R
 import dev.lindroid.app.desktop.DesktopActivity
-import dev.lindroid.app.desktop.LocalDesktopServer
+import dev.lindroid.app.desktop.RfbClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,7 +50,6 @@ object DesktopSessionBus {
 class DesktopSessionService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var process: Process? = null
-    private var localServer: LocalDesktopServer? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -78,7 +77,6 @@ class DesktopSessionService : Service() {
 
         scope.launch {
             try {
-                localServer = LocalDesktopServer(this@DesktopSessionService, scope).also { it.start() }
                 val command = ProotRuntime.cleanEnvironment(
                     command = listOf("/bin/bash", "-lc", DESKTOP_SCRIPT),
                     extra = mapOf("LINDROID_VNC_PASSWORD" to password),
@@ -130,8 +128,6 @@ class DesktopSessionService : Service() {
                     null,
                 )
             } finally {
-                localServer?.close()
-                localServer = null
                 process = null
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -145,7 +141,7 @@ class DesktopSessionService : Service() {
             val connected = runCatching {
                 Socket().use { socket ->
                     socket.connect(
-                        InetSocketAddress(InetAddress.getLoopbackAddress(), LocalDesktopServer.VNC_PORT),
+                        InetSocketAddress(InetAddress.getLoopbackAddress(), RfbClient.VNC_PORT),
                         250,
                     )
                 }
@@ -160,7 +156,6 @@ class DesktopSessionService : Service() {
     private fun stopDesktop() {
         DesktopSessionBus.update(DesktopSessionStatus.STOPPED, "Desktop stopped", null)
         process?.destroy()
-        localServer?.close()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -210,7 +205,6 @@ class DesktopSessionService : Service() {
 
     override fun onDestroy() {
         process?.destroy()
-        localServer?.close()
         scope.cancel()
         super.onDestroy()
     }
